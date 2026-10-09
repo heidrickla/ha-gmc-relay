@@ -1,0 +1,21 @@
+configuration:
+  webhook_id:
+    name: Webhook id
+    description: The Home Assistant webhook that receives readings. Use the same id in the template trigger.
+  counter_ids:
+    name: Counter ids
+    description: Accepted GID values. Empty accepts any counter.
+  forward:
+    name: Forward to gmcmap
+    description: Replay each upload to the forward URL so the public map keeps updating.
+  forward_url:
+    name: Forward URL
+    description: Where uploads are replayed.
+  core_url:
+    name: Home Assistant URL
+    description: Where the webhook is posted, as the app reaches core. The default works on Home Assistant OS and Supervised.
+  log_level:
+    name: Log level
+    description: debug logs every request.
+network:
+  80/tcp: Where the counter uploads. GQ counters only speak to port 80.

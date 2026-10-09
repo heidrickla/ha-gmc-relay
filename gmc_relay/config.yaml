@@ -1,0 +1,37 @@
+name: GMC Relay
+version: "0.2.0"
+slug: gmc_relay
+description: Receive a GQ GMC Geiger counter's WiFi upload on port 80, hand it to Home Assistant, forward it to gmcmap.com
+url: https://github.com/heidrickla/ha-gmc-relay
+arch:
+  - amd64
+  - aarch64
+startup: services
+boot: auto
+init: false
+stage: stable
+advanced: false
+ports:
+  80/tcp: 80
+ports_description:
+  80/tcp: Where the counter uploads. GQ counters only speak to port 80.
+watchdog: http://[HOST]:[PORT:80]/healthz
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:radioactive
+panel_title: GMC Relay
+options:
+  webhook_id: ""
+  counter_ids: []
+  forward: true
+  forward_url: https://www.gmcmap.com
+  core_url: https://homeassistant:8123
+  log_level: info
+schema:
+  webhook_id: password
+  counter_ids:
+    - str
+  forward: bool
+  forward_url: url
+  core_url: url
+  log_level: list(debug|info|warning|error)

@@ -1,0 +1,39 @@
+#include <tunables/global>
+
+profile gmc_relay flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  #include <abstractions/nameservice>
+  #include <abstractions/ssl_certs>
+  #include <abstractions/python>
+
+  # Files: the rule set the Home Assistant example profiles use for an
+  # s6-overlay based image, so init and the wrapper script can run.
+  file,
+  signal (send) set=(kill,term,int,hup,cont),
+  signal (receive) set=(kill,term,int,hup,cont),
+
+  /init ix,
+  /bin/** ix,
+  /usr/bin/** ix,
+  /run/{s6,s6-rc*,service}/** ix,
+  /package/** ix,
+  /command/** ix,
+  /etc/services.d/** rwix,
+  /etc/cont-init.d/** rwix,
+  /etc/cont-finish.d/** rwix,
+  /run/{,**} rwk,
+  /dev/tty rw,
+  /tmp/** rwk,
+  /run.sh ix,
+
+  # add-on options
+  /data/** r,
+
+  # the server and the page
+  /opt/gmc_relay/** r,
+  /usr/lib/python3*/** mr,
+
+  # listens on port 80; reaches the Supervisor and gmcmap
+  network inet stream,
+  network inet6 stream,
+}

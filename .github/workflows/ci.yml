@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# The personal forge's runner also reads .github/workflows; these jobs run on GitHub only.
+jobs:
+  lint:
+    name: Lint
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install
+        run: python -m pip install --quiet "ruff==0.15.21" "yamllint==1.35.1" "shellcheck-py==0.10.0.1"
+      - name: ruff
+        run: |
+          python -m ruff check .
+          python -m ruff format --check .
+      - name: yamllint
+        run: >-
+          yamllint -d "{extends: relaxed, rules: {line-length: {max: 160}, comments: {min-spaces-from-content: 1}}}"
+          repository.yaml gmc_relay/config.yaml gmc_relay/build.yaml gmc_relay/translations/en.yaml
+          .github/workflows/ci.yml .gitea/workflows/validate.yml
+      - name: shellcheck
+        run: shellcheck gmc_relay/run.sh
+      - name: hadolint
+        uses: hadolint/hadolint-action@v3.5.0
+        with:
+          dockerfile: gmc_relay/Dockerfile
+          failure-threshold: info
+
+  test:
+    name: Test
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.14"
+      - name: Install
+        run: python -m pip install --quiet "pytest==9.0.3"
+      - name: pytest
+        run: python -m pytest
+
+  build:
+    name: Build ${{ matrix.arch }}
+    if: github.server_url == 'https://github.com'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: aarch64
+            platform: linux/arm64
+    steps:
+      - uses: actions/checkout@v5
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build
+        run: >-
+          docker buildx build --load --platform ${{ matrix.platform }}
+          --build-arg BUILD_FROM=ghcr.io/home-assistant/${{ matrix.arch }}-base:3.24
+          --build-arg BUILD_ARCH=${{ matrix.arch }}
+          -t gmc-relay:${{ matrix.arch }} gmc_relay
+      # The image runs: the watchdog endpoint answers, an upload is accepted, and the
+      # ingress listener refuses an address that is not the ingress gateway.
+      - name: Run
+        run: |
+          mkdir -p data
+          echo '{"webhook_id": "", "counter_ids": [], "forward": false}' > data/options.json
+          docker run -d --name relay --platform ${{ matrix.platform }} -v "$PWD/data:/data:ro" \
+            -p 18080:80 -p 18099:8099 gmc-relay:${{ matrix.arch }}
+          for _ in $(seq 1 60); do curl -sf http://127.0.0.1:18080/healthz && break; sleep 1; done
+          test "$(curl -s http://127.0.0.1:18080/healthz)" = "ok"
+          test "$(curl -s 'http://127.0.0.1:18080/log2.asp?AID=1&GID=2&CPM=21')" = "OK.ERR0."
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18099/)" = "403"
+          docker logs relay

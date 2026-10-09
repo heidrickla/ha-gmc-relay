@@ -1,0 +1,23 @@
+[project]
+name = "ha-gmc-relay"
+version = "0.2.0"
+description = "Home Assistant add-on: relay a GQ GMC Geiger counter upload into Home Assistant"
+requires-python = ">=3.14"
+license = "MIT"
+
+# The server runs under the add-on base image's Alpine python3 (3.14 on
+# Alpine 3.24), so the target is that, not Home Assistant's own floor.
+[tool.ruff]
+target-version = "py314"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "B", "UP", "RUF", "SIM", "PL"]
+ignore = ["PLR2004", "PLR0913"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR0915", "E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

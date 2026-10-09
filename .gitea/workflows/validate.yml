@@ -1,0 +1,65 @@
+name: Lint and test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  lint:
+    name: Lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 15
+      - uses: actions/setup-python@v5
+        timeout-minutes: 15
+        with:
+          python-version: "3.14"
+
+      # Everything pinned and pip-installed into a venv of this job's own: the
+      # runner's Python toolcache is shared with other repos and carries their
+      # packages, among them a pytest plugin that blocks sockets.
+      - name: Install
+        timeout-minutes: 15
+        run: >-
+          python -m venv "$RUNNER_TEMP/venv" &&
+          "$RUNNER_TEMP/venv/bin/python" -m pip install --quiet "ruff==0.15.21" "yamllint==1.35.1"
+          "shellcheck-py==0.10.0.1" "pytest==9.0.3"
+
+      - name: ruff
+        timeout-minutes: 15
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m ruff check .
+          "$RUNNER_TEMP/venv/bin/python" -m ruff format --check .
+
+      - name: yamllint
+        timeout-minutes: 15
+        run: >-
+          "$RUNNER_TEMP/venv/bin/yamllint" -d "{extends: relaxed, rules: {line-length: {max: 160}, comments: {min-spaces-from-content: 1}}}"
+          repository.yaml gmc_relay/config.yaml gmc_relay/build.yaml gmc_relay/translations/en.yaml
+          .gitea/workflows/validate.yml .github/workflows/ci.yml
+
+      - name: shellcheck
+        timeout-minutes: 15
+        run: |
+          "$RUNNER_TEMP/venv/bin/shellcheck" gmc_relay/run.sh
+
+      # The server runs on the base image's python3 (3.14); the relay is
+      # tested between a fake counter, a fake core and a fake gmcmap. The
+      # image is built on the host by `ha apps rebuild`.
+      - name: Tests
+        timeout-minutes: 15
+        run: |
+          "$RUNNER_TEMP/venv/bin/python" -m pytest --durations=15 --junitxml=reports/junit-1.xml
+
+      # each test's time and result, kept whatever the outcome: the forge shows no job log
+      - name: test results
+        if: always()
+        timeout-minutes: 5
+        uses: actions/upload-artifact@ff15f0306b3f739f7b6fd43fb5d26cd321bd4de5 # v3.2.1
+        with:
+          name: test-results-${{ github.job }}
+          path: reports/
+          retention-days: 14

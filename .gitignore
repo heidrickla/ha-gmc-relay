@@ -1,0 +1,13 @@
+# Never commit an API key or an environment file holding one.
+*.env
+*.key
+.DS_Store
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.venv/
+# Agent instruction files are not part of the project.
+CLAUDE.md
+AGENTS.md
+CONTRIBUTING.md
+.cursorrules
