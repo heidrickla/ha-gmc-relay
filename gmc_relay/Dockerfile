@@ -13,10 +13,10 @@ ARG BUILD_ARCH=amd64
 # replaces that package version within it.
 # hadolint ignore=DL3018
 RUN apk add --no-cache python3 ca-certificates \
- && python3 -c "import http.server, ssl, urllib.request; print('python ok')"
+ && python3 -c "import http.server, sqlite3, ssl, urllib.request; print('python ok')"
 
 WORKDIR /opt/gmc_relay
-COPY server.py ./
+COPY server.py panel.html ./
 RUN python3 -m py_compile server.py
 
 COPY run.sh /run.sh

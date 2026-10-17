@@ -26,8 +26,10 @@ profile gmc_relay flags=(attach_disconnected,mediate_deleted) {
   /tmp/** rwk,
   /run.sh ix,
 
-  # add-on options
-  /data/** r,
+  # options, and the history database with its WAL files
+  /data/** rwk,
+  # the add-on's config folder: import.csv is read, then renamed
+  /config/** rw,
 
   # the server and the page
   /opt/gmc_relay/** r,

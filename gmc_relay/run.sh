@@ -3,4 +3,5 @@
 set -eu
 
 echo "[gmc-relay] serving on :80"
-exec python3 /opt/gmc_relay/server.py --options /data/options.json --port 80 --ingress-port 8099
+exec python3 /opt/gmc_relay/server.py --options /data/options.json --port 80 --ingress-port 8099 \
+    --history /data/history.db --config-dir /config

@@ -16,7 +16,8 @@ on port 80. The defaults are Website `www.gmcmap.com`, URL `log2.asp`. Set Websi
 
 | Step | Detail |
 |---|---|
-| Accept | `GET /log2.asp` or `/log2.php` with a numeric `CPM`; `ACPM` and `uSV` optional. Query keys in any letter case. An upload without a numeric `CPM` gets 400. |
+| Accept | `GET /log2.asp` or `/log2.php` with a numeric `CPM`; `ACPM` and `uSV` optional. Query keys in any letter case. An upload without a finite numeric `CPM` gets 400. |
+| Keep | The reading goes into the history behind the panel. |
 | Check | If `counter_ids` is set, a `GID` not in it is refused with 403 and not forwarded. |
 | Home Assistant | POST `{"cpm", "acpm", "usv", "gid", "aid", "path", "received"}` to the webhook `webhook_id` at `core_url`, straight to core on the apps network. |
 | gmcmap | With `forward` on, the exact request is replayed to `forward_url` and the counter gets gmcmap's reply. |
@@ -24,9 +25,41 @@ on port 80. The defaults are Website `www.gmcmap.com`, URL `log2.asp`. Set Websi
 
 `GET /healthz` answers `ok` for the watchdog; `GET /status.json` shows the count of readings passed on and the last one.
 
-## Status panel
+## Panel
 
-The sidebar entry GMC Relay shows the readings passed on, the last reading with its time, the forward target and whether the webhook is set. It reloads every 30 seconds. It is served on port 8099 to Home Assistant's ingress gateway only.
+The sidebar entry GMC Relay, served on port 8099 to Home Assistant's ingress gateway only.
+
+| Part | Shows |
+|---|---|
+| Header | The counter id, the last webhook answer from Home Assistant and the last answer from gmcmap. |
+| Dose rate now | The latest µSv/h, CPM and ACPM, the time since the upload, and the last 60 readings' CPM. |
+| Past year | Each day's average dose rate as a calendar; fewer weeks on a narrow screen. |
+| Filters | Range 24 h, 7 d, 30 d, 90 d, 1 y or all; CPM or µSv/h; a counter picker when more than one counter has uploaded. |
+| Tiles | Average with its change against the period before; highest reading and when; estimated dose (average µSv/h times the hours covered) with its yearly rate; reading count. |
+| Trend | The average per bucket with the lowest-to-highest band; buckets of 5 min for 24 h up to 1 day for a year. A gap of more than two buckets breaks the line. Hover or arrow keys for values; Table lists every bucket. |
+| Hour of day | Each local hour's average as a difference from the range's average. |
+| Count distribution | How often each CPM value was read, with the Poisson distribution of the same mean. |
+
+The status refreshes every 15 seconds and the charts every minute. Dark by default; the theme, range and measure are kept in the browser.
+
+## History
+
+Every reading that passes the counter check is kept in `/data/history.db` (SQLite), whether or not Home Assistant accepted the webhook; a minute's upload period adds about 25 MB a year. It is part of the app's backups.
+
+To seed it, put `import.csv` in the app's config folder (`/addon_configs/<repository>_gmc_relay/` on the host, `local_gmc_relay` for a local copy) and restart. It is read once and renamed `import.csv.done`; rows already in the history are skipped.
+
+```
+time,cpm,acpm,usv,gid
+2026-09-18T21:27:53-05:00,23,15.5,0.14,01234567890
+1789784918,32,15.5,0.14,01234567890
+```
+
+| Column | Required | Format |
+|---|---|---|
+| `time` | yes | Epoch seconds, or ISO 8601; without an offset it is UTC. |
+| `cpm` | yes | Number. |
+| `acpm`, `usv` | no | Number or empty. |
+| `gid` | no | Counter id; empty takes the one `counter_ids` entry, if there is exactly one. |
 
 ## Options
 

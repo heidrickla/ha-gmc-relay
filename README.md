@@ -2,7 +2,7 @@
 
 | App | What |
 |---|---|
-| [GMC Relay](gmc_relay/) | Receive a GQ GMC Geiger counter's upload, hand it to Home Assistant, forward it to gmcmap.com. Status panel in the sidebar. |
+| [GMC Relay](gmc_relay/) | Receive a GQ GMC Geiger counter's upload, hand it to Home Assistant, forward it to gmcmap.com. Sidebar dashboard of the readings it keeps. |
 
 ## Installing
 

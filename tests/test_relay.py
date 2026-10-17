@@ -6,9 +6,11 @@ import importlib.util
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import ClassVar
 
@@ -96,6 +98,9 @@ def test_parse_upload_is_case_insensitive_and_numeric():
     assert server.parse_upload("AID=1&GID=2") is None
     assert server.parse_upload("CPM=abc") is None
     assert server.parse_upload("CPM=5")["acpm"] is None
+    # json.dumps writes these as Infinity and NaN, which no browser parses
+    assert server.parse_upload("CPM=inf") is None and server.parse_upload("CPM=nan") is None
+    assert server.parse_upload("CPM=5&ACPM=-inf&uSV=nan")["acpm"] is None
 
 
 def test_upload_reaches_home_assistant_and_gmcmap(stack):
@@ -174,34 +179,165 @@ def status_server(relay, allowed):
     return srv, f"http://127.0.0.1:{srv.server_port}"
 
 
-def test_status_page_shows_the_last_reading_escaped():
+def test_panel_is_static_and_fetches_relative_to_the_ingress_path():
     relay = server.Relay({"webhook_id": "x", "forward": False})
-    relay.received = 3
-    relay.last = {
-        "cpm": 21.0,
-        "acpm": 15.02,
-        "usv": 0.13,
-        "gid": "<b>7</b>",
-        "received": "2026-10-09T05:00:00+00:00",
-    }
     srv, base = status_server(relay, ("127.0.0.1",))
     try:
         status, body = get(f"{base}/")
         page = body.decode()
-        assert status == 200 and "<td>3</td>" in page and "<td>21.0</td>" in page
-        assert "&lt;b&gt;7&lt;/b&gt;" in page and "<b>7</b>" not in page
-        assert '<meta http-equiv="refresh" content="30">' in page
-        assert json.loads(get(f"{base}/status.json")[1])["received"] == 3
+        assert status == 200 and "<script>" in page
+        # ingress serves the panel under /api/hassio_ingress/<token>/
+        assert 'getJSON("api/status")' in page and 'getJSON("api/history?range=' in page
+        assert 'fetch("/' not in page and 'getJSON("/' not in page
+        # data reaches the DOM as text only
+        assert "innerHTML" not in page
+        assert json.loads(get(f"{base}/status.json")[1])["received"] == 0
         assert get(f"{base}/log2.asp?CPM=1")[0] == 404
     finally:
         srv.shutdown()
 
 
-def test_status_listener_answers_only_the_ingress_gateway():
-    relay = server.Relay({"webhook_id": "x"})
+def test_status_listener_answers_only_the_ingress_gateway(tmp_path):
+    relay = server.Relay({"webhook_id": "x"}, server.History(str(tmp_path / "h.db")))
     srv, base = status_server(relay, (server.INGRESS_GATEWAY,))
     try:
-        assert get(f"{base}/")[0] == 403
-        assert get(f"{base}/status.json")[0] == 403
+        for path in ("/", "/status.json", "/api/status", "/api/history", "/api/hourly"):
+            assert get(f"{base}{path}")[0] == 403, path
+    finally:
+        srv.shutdown()
+
+
+# --------------------------------------------------------------------- history
+T0 = 1_790_000_000 // 86400 * 86400  # a UTC midnight
+
+
+def history_with(tmp_path, rows, gid="g1"):
+    h = server.History(str(tmp_path / "h.db"))
+    for ts, cpm, usv in rows:
+        assert h.add(gid, ts, cpm, None, usv)
+    return h
+
+
+def test_bucket_keeps_each_range_under_the_point_limit():
+    assert server.bucket_for(86400) == 300
+    assert server.bucket_for(7 * 86400) == 1800
+    assert server.bucket_for(365 * 86400) == 86400
+    for name, seconds in server.RANGES.items():
+        if seconds:
+            assert seconds / server.bucket_for(seconds) <= server.MAX_POINTS, name
+
+
+def test_history_add_dedupes_and_counts(tmp_path):
+    h = history_with(tmp_path, [(T0, 10, 0.06)])
+    assert not h.add("g1", T0, 99, None, None)
+    assert h.add("g2", T0 + 5, 12, None, None)
+    assert h.counters == {"g1": [1, T0], "g2": [1, T0 + 5]}
+    assert h.default_gid() == "g2"
+    reopened = server.History(str(tmp_path / "h.db"))
+    assert reopened.counters == h.counters
+
+
+def test_series_buckets_mean_min_max_and_summary(tmp_path):
+    now = T0 + 86400 - 10
+    rows = [(T0 + 60, 10, 0.06), (T0 + 120, 20, 0.12), (T0 + 7200, 30, 0.18)]
+    h = history_with(tmp_path, [*rows, (T0 - 3600, 5, 0.03)])
+    s = h.series("g1", "24h", now)
+    assert s["step"] == 300 and s["start"] == now + 1 - 86400
+    pts = {p[0]: p for p in s["points"]}
+    assert pts[T0] == pytest.approx([T0, 2, 15.0, 10, 20, 0.09, 0.06, 0.12])
+    assert pts[T0 + 7200][1:5] == [1, 30.0, 30, 30]
+    st = s["stats"]
+    assert st["n"] == 3 and st["cpm_mean"] == 20.0 and st["peak"] == [T0 + 7200, 30.0, 0.18]
+    assert st["first"] == T0 + 60 and st["last"] == T0 + 7200
+    assert st["dose_usv"] == pytest.approx(0.12 * (7140 / 3600))
+    # the reading an hour before midnight is in the 24 h before this window
+    assert st["prev"] == {"n": 1, "cpm_mean": 5.0, "usv_mean": 0.03}
+    assert s["hourly"][0] == [T0, 2, 30.0, 2, pytest.approx(0.18)]
+    assert s["hist"] == [[10, 1], [20, 1], [30, 1]]
+
+
+def test_series_all_starts_at_the_first_reading_and_filters_by_counter(tmp_path):
+    h = history_with(tmp_path, [(T0, 10, None), (T0 + 400 * 86400, 12, None)])
+    h.add("other", T0 - 900 * 86400, 99, None, None)
+    s = h.series("g1", "all", T0 + 400 * 86400 + 5)
+    assert s["start"] == T0 and s["stats"]["n"] == 2 and s["stats"]["peak"][1] == 12
+    assert s["stats"]["usv_mean"] is None and s["stats"]["dose_usv"] is None
+    assert len(s["points"]) <= server.MAX_POINTS
+
+
+def test_histogram_rounds_counts(tmp_path):
+    h = history_with(tmp_path, [(T0 + i, v, None) for i, v in enumerate((9.6, 10.4, 10.0, 11.5))])
+    assert h.series("g1", "24h", T0 + 100)["hist"] == [[10, 3], [12, 1]]
+
+
+def test_import_csv_reads_epoch_and_iso_and_counts_bad_rows(tmp_path):
+    h = server.History(str(tmp_path / "h.db"))
+    path = tmp_path / "import.csv"
+    path.write_text(
+        "time,cpm,acpm,usv,gid\n"
+        f"{T0},10,15.5,0.06,\n"
+        "2026-10-01T05:00:00+00:00,11,,0.07,g9\n"
+        "2026-10-01T05:01:00,12,,,\n"
+        "yesterday,10,,,\n"
+        f"{T0 + 1},,,,\n"
+        f"{T0 + 2},nan,,,\n"
+        f"{T0},10,15.5,0.06,\n",
+        encoding="utf-8",
+    )
+    assert h.import_csv(str(path), "g1") == (3, 1, 3)
+    iso = int(datetime(2026, 10, 1, 5, tzinfo=UTC).timestamp())
+    assert h.latest("g9") == [[iso, 11.0, None, 0.07]]
+    assert h.latest("g1") == [[T0, 10.0, 15.5, 0.06], [iso + 60, 12.0, None, None]]
+
+
+def test_import_pending_renames_the_file_once_read(tmp_path):
+    h = server.History(str(tmp_path / "h.db"))
+    (tmp_path / "import.csv").write_text(f"time,cpm\n{T0},10\n", encoding="utf-8")
+    server.import_pending(h, str(tmp_path), "g1")
+    assert not (tmp_path / "import.csv").exists() and (tmp_path / "import.csv.done").exists()
+    assert h.counters == {"g1": [1, T0]}
+    server.import_pending(h, str(tmp_path), "g1")  # nothing left to read
+    assert h.counters == {"g1": [1, T0]}
+
+
+def test_upload_is_kept_even_when_the_webhook_refuses(tmp_path):
+    h = server.History(str(tmp_path / "h.db"))
+    relay = server.Relay({"webhook_id": "", "forward": False, "counter_ids": ["7"]}, h)
+    assert relay.handle_upload("/log2.asp", "GID=7&CPM=21&ACPM=15&uSV=0.13")[0] == 200
+    assert relay.received == 0 and relay.webhook_result[0] == 0
+    assert h.counters["7"][0] == 1
+    assert h.latest("7")[0][1:] == [21.0, 15.0, 0.13]
+    relay.handle_upload("/log2.asp", "GID=8&CPM=21")
+    relay.handle_upload("/log2.asp", "GID=7&CPM=inf")
+    relay.handle_upload("/log2.asp", "GID=7")
+    assert h.counters == {"7": [1, h.counters["7"][1]]}
+
+
+def test_a_broken_history_does_not_stop_the_relay(tmp_path):
+    h = server.History(str(tmp_path / "h.db"))
+    h.db.close()
+    relay = server.Relay({"webhook_id": "", "forward": False}, h)
+    assert relay.handle_upload("/log2.asp", "CPM=21") == (200, b"OK.ERR0.")
+
+
+def test_panel_api_serves_status_history_and_refuses_bad_input(tmp_path):
+    now = int(time.time())
+    h = history_with(tmp_path, [(now - 120, 10, 0.06), (now - 60, 14, 0.08)])
+    relay = server.Relay({"webhook_id": "x", "forward": False}, h)
+    srv, base = status_server(relay, ("127.0.0.1",))
+    try:
+        st = json.loads(get(f"{base}/api/status")[1])
+        assert st["gid"] == "g1" and st["recent"][-1] == [now - 60, 14.0, None, 0.08]
+        assert st["counters"] == {"g1": {"n": 2, "last": now - 60}} and st["webhook_set"]
+        doc = json.loads(get(f"{base}/api/history?range=24h")[1])
+        assert doc["gid"] == "g1" and doc["stats"]["n"] == 2
+        assert json.loads(get(f"{base}/api/history?range=7d&gid=g1")[1])["range"] == "7d"
+        assert json.loads(get(f"{base}/api/history?gid=nobody")[1]) == {
+            "gid": "nobody",
+            "empty": True,
+        }
+        assert len(json.loads(get(f"{base}/api/hourly?days=2")[1])["hourly"]) >= 1
+        assert get(f"{base}/api/history?range=5y")[0] == 400
+        assert get(f"{base}/api/hourly?days=x")[0] == 400
     finally:
         srv.shutdown()
