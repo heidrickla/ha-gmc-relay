@@ -350,7 +350,15 @@ def test_an_empty_counter_list_refuses_every_upload_and_says_so_once(tmp_path, c
     FakeGmcmap.gets.clear()
     core = spin(FakeCore)
     h = server.History(str(tmp_path / "h.db"))
-    relay = server.Relay({"webhook_id": WEBHOOK, "core_url": f"http://127.0.0.1:{core.server_port}", "forward": True, "forward_url": "http://127.0.0.1:9"}, h)
+    relay = server.Relay(
+        {
+            "webhook_id": WEBHOOK,
+            "core_url": f"http://127.0.0.1:{core.server_port}",
+            "forward": True,
+            "forward_url": "http://127.0.0.1:9",
+        },
+        h,
+    )
     n = len(FakeCore.posts)
     try:
         for _ in range(3):
@@ -383,11 +391,58 @@ def tls_core(tmp_path_factory):
     def ossl(*args):
         subprocess.run(["openssl", *args], check=True, capture_output=True, cwd=d)
 
-    ca_ext = ("-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
-    ossl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=test ca", *ca_ext)
-    ossl("req", "-newkey", "rsa:2048", "-nodes", "-keyout", "core.key", "-out", "core.csr", "-subj", "/CN=core")
+    ca_ext = (
+        "-addext",
+        "basicConstraints=critical,CA:TRUE",
+        "-addext",
+        "keyUsage=critical,keyCertSign,cRLSign",
+    )
+    ossl(
+        "req",
+        "-x509",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "ca.key",
+        "-out",
+        "ca.pem",
+        "-days",
+        "2",
+        "-subj",
+        "/CN=test ca",
+        *ca_ext,
+    )
+    ossl(
+        "req",
+        "-newkey",
+        "rsa:2048",
+        "-nodes",
+        "-keyout",
+        "core.key",
+        "-out",
+        "core.csr",
+        "-subj",
+        "/CN=core",
+    )
     (d / "san.cnf").write_text("subjectAltName=IP:127.0.0.1\n")
-    ossl("x509", "-req", "-in", "core.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "core.pem", "-days", "2", "-extfile", "san.cnf")
+    ossl(
+        "x509",
+        "-req",
+        "-in",
+        "core.csr",
+        "-CA",
+        "ca.pem",
+        "-CAkey",
+        "ca.key",
+        "-CAcreateserial",
+        "-out",
+        "core.pem",
+        "-days",
+        "2",
+        "-extfile",
+        "san.cnf",
+    )
     srv = HTTPServer(("127.0.0.1", 0), FakeCore)
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(d / "core.pem", d / "core.key")
@@ -398,7 +453,17 @@ def tls_core(tmp_path_factory):
 
 
 def tls_relay(url, config_dir="", **options):
-    return server.Relay({"webhook_id": WEBHOOK, "core_url": url, "counter_ids": ["01234567890"], "forward": False, **options}, None, config_dir)
+    return server.Relay(
+        {
+            "webhook_id": WEBHOOK,
+            "core_url": url,
+            "counter_ids": ["01234567890"],
+            "forward": False,
+            **options,
+        },
+        None,
+        config_dir,
+    )
 
 
 def test_core_certificate_is_verified_by_default(tls_core, tmp_path):
@@ -417,7 +482,9 @@ def test_core_certificate_is_checked_against_the_ca_in_the_config_folder(tls_cor
     relay = tls_relay(url, str(tmp_path))
     relay.handle_upload("/log2.asp", UPLOAD)
     assert relay.webhook_result[0] == 200 and len(FakeCore.posts) == n + 1
-    other = tls_relay(url.replace("127.0.0.1", "localhost"), str(tmp_path))  # the certificate does not name it
+    other = tls_relay(
+        url.replace("127.0.0.1", "localhost"), str(tmp_path)
+    )  # the certificate does not name it
     other.handle_upload("/log2.asp", UPLOAD)
     assert other.webhook_result[0] == 0
 

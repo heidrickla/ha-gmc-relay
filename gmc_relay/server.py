@@ -369,7 +369,9 @@ class Relay:
             return 400, b"missing CPM"
         if not self.counter_ids:
             if not self.warned_no_counters:
-                LOG.error("counter_ids is empty: every upload is refused until it lists the counter's GID")
+                LOG.error(
+                    "counter_ids is empty: uploads are refused until it lists the counter's GID"
+                )
                 self.warned_no_counters = True
             return 403, b"no counter configured"
         if reading["gid"] not in self.counter_ids:
@@ -409,7 +411,7 @@ class Relay:
 
     # -- the panel ------------------------------------------------------------
     def public_status(self) -> dict:
-        """Port 80's /status.json, which any LAN host can read: the last reading without AID and GID."""
+        """Port 80's /status.json, open to the LAN: the last reading without AID and GID."""
         last = {k: v for k, v in self.last.items() if k not in COUNTER_KEYS} if self.last else None
         return {"received": self.received, "last": last, "forward": self.forward}
 
