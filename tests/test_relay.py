@@ -5,6 +5,8 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import ssl
+import subprocess
 import threading
 import time
 import urllib.error
@@ -162,7 +164,7 @@ def test_webhook_refusal_is_logged_not_fatal(stack, caplog):
 
 
 def test_forward_off_answers_ok_itself():
-    relay = server.Relay({"webhook_id": "", "forward": False})
+    relay = server.Relay({"webhook_id": "", "forward": False, "counter_ids": ["01234567890"]})
     status, body = relay.handle_upload("/log2.asp", UPLOAD)
     assert status == 200 and body == b"OK.ERR0."
 
@@ -316,8 +318,8 @@ def test_upload_is_kept_even_when_the_webhook_refuses(tmp_path):
 def test_a_broken_history_does_not_stop_the_relay(tmp_path):
     h = server.History(str(tmp_path / "h.db"))
     h.db.close()
-    relay = server.Relay({"webhook_id": "", "forward": False}, h)
-    assert relay.handle_upload("/log2.asp", "CPM=21") == (200, b"OK.ERR0.")
+    relay = server.Relay({"webhook_id": "", "forward": False, "counter_ids": ["7"]}, h)
+    assert relay.handle_upload("/log2.asp", "GID=7&CPM=21") == (200, b"OK.ERR0.")
 
 
 def test_panel_api_serves_status_history_and_refuses_bad_input(tmp_path):
@@ -341,3 +343,87 @@ def test_panel_api_serves_status_history_and_refuses_bad_input(tmp_path):
         assert get(f"{base}/api/hourly?days=x")[0] == 400
     finally:
         srv.shutdown()
+
+
+# --------------------------------------------------------------------- counters, status, TLS
+def test_an_empty_counter_list_refuses_every_upload_and_says_so_once(tmp_path, caplog):
+    FakeGmcmap.gets.clear()
+    core = spin(FakeCore)
+    h = server.History(str(tmp_path / "h.db"))
+    relay = server.Relay({"webhook_id": WEBHOOK, "core_url": f"http://127.0.0.1:{core.server_port}", "forward": True, "forward_url": "http://127.0.0.1:9"}, h)
+    n = len(FakeCore.posts)
+    try:
+        for _ in range(3):
+            assert relay.handle_upload("/log2.asp", UPLOAD) == (403, b"no counter configured")
+    finally:
+        core.shutdown()
+    assert len(FakeCore.posts) == n and FakeGmcmap.gets == [] and h.counters == {}
+    assert relay.received == 0 and relay.forward_result is None
+    assert sum("counter_ids is empty" in r.message for r in caplog.records) == 1
+
+
+def test_port_80_status_leaves_out_the_counter_keys_and_ingress_keeps_them(stack):
+    base, relay = stack
+    assert get(f"{base}/log2.asp?{UPLOAD}")[0] == 200
+    doc = json.loads(get(f"{base}/status.json")[1])
+    assert doc["last"]["cpm"] == 21 and "aid" not in doc["last"] and "gid" not in doc["last"]
+    assert b"01234567890" not in get(f"{base}/status.json")[1]
+    srv, ingress = status_server(relay, ("127.0.0.1",))
+    try:
+        assert json.loads(get(f"{ingress}/status.json")[1])["last"]["gid"] == "01234567890"
+    finally:
+        srv.shutdown()
+
+
+@pytest.fixture(scope="module")
+def tls_core(tmp_path_factory):
+    """Core on https with a certificate from a throwaway CA, which names 127.0.0.1."""
+    d = tmp_path_factory.mktemp("tls")
+
+    def ossl(*args):
+        subprocess.run(["openssl", *args], check=True, capture_output=True, cwd=d)
+
+    ca_ext = ("-addext", "basicConstraints=critical,CA:TRUE", "-addext", "keyUsage=critical,keyCertSign,cRLSign")
+    ossl("req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", "ca.key", "-out", "ca.pem", "-days", "2", "-subj", "/CN=test ca", *ca_ext)
+    ossl("req", "-newkey", "rsa:2048", "-nodes", "-keyout", "core.key", "-out", "core.csr", "-subj", "/CN=core")
+    (d / "san.cnf").write_text("subjectAltName=IP:127.0.0.1\n")
+    ossl("x509", "-req", "-in", "core.csr", "-CA", "ca.pem", "-CAkey", "ca.key", "-CAcreateserial", "-out", "core.pem", "-days", "2", "-extfile", "san.cnf")
+    srv = HTTPServer(("127.0.0.1", 0), FakeCore)
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    ctx.load_cert_chain(d / "core.pem", d / "core.key")
+    srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"https://127.0.0.1:{srv.server_port}", d
+    srv.shutdown()
+
+
+def tls_relay(url, config_dir="", **options):
+    return server.Relay({"webhook_id": WEBHOOK, "core_url": url, "counter_ids": ["01234567890"], "forward": False, **options}, None, config_dir)
+
+
+def test_core_certificate_is_verified_by_default(tls_core, tmp_path):
+    url, _ = tls_core
+    n = len(FakeCore.posts)
+    relay = tls_relay(url, str(tmp_path))  # no core-ca.pem: the system store does not know the CA
+    assert relay.handle_upload("/log2.asp", UPLOAD) == (200, b"OK.ERR0.")
+    assert relay.webhook_result[0] == 0 and len(FakeCore.posts) == n
+    assert tls_relay(url).core_context().verify_mode == ssl.CERT_REQUIRED
+
+
+def test_core_certificate_is_checked_against_the_ca_in_the_config_folder(tls_core, tmp_path):
+    url, d = tls_core
+    (tmp_path / server.CORE_CA_FILE).write_bytes((d / "ca.pem").read_bytes())
+    n = len(FakeCore.posts)
+    relay = tls_relay(url, str(tmp_path))
+    relay.handle_upload("/log2.asp", UPLOAD)
+    assert relay.webhook_result[0] == 200 and len(FakeCore.posts) == n + 1
+    other = tls_relay(url.replace("127.0.0.1", "localhost"), str(tmp_path))  # the certificate does not name it
+    other.handle_upload("/log2.asp", UPLOAD)
+    assert other.webhook_result[0] == 0
+
+
+def test_core_verify_tls_off_skips_the_check(tls_core):
+    url, _ = tls_core
+    relay = tls_relay(url, core_verify_tls=False)
+    relay.handle_upload("/log2.asp", UPLOAD)
+    assert relay.webhook_result[0] == 200

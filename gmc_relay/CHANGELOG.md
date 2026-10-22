@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+
+- `counter_ids` is required: while it is empty every upload is refused with 403, and the log says so once.
+- Port 80's `/status.json` leaves out the last reading's `AID` and `GID`; the ingress panel keeps them.
+- `core_verify_tls` (default on): core's certificate on an `https` `core_url` is checked against `core-ca.pem` in the config folder, else the system store.
+
 ## 0.3.0
 
 - The relay keeps every accepted reading in `/data/history.db`, whatever the webhook answers.

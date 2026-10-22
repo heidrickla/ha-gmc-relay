@@ -4,7 +4,7 @@ configuration:
     description: The Home Assistant webhook that receives readings. Use the same id in the template trigger.
   counter_ids:
     name: Counter ids
-    description: Accepted GID values. Empty accepts any counter.
+    description: Accepted GID values. Required; while empty every upload is refused.
   forward:
     name: Forward to gmcmap
     description: Replay each upload to the forward URL so the public map keeps updating.
@@ -14,6 +14,9 @@ configuration:
   core_url:
     name: Home Assistant URL
     description: Where the webhook is posted, as the app reaches core. The default works on Home Assistant OS and Supervised.
+  core_verify_tls:
+    name: Verify core's certificate
+    description: Check core's certificate on an https URL, against core-ca.pem in the app's config folder when it is there, else the system store.
   log_level:
     name: Log level
     description: debug logs every request.

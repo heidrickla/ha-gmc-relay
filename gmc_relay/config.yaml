@@ -1,5 +1,5 @@
 name: GMC Relay
-version: "0.3.0"
+version: "0.4.0"
 slug: gmc_relay
 description: Receive a GQ GMC Geiger counter's WiFi upload on port 80, hand it to Home Assistant, forward it to gmcmap.com
 url: https://github.com/heidrickla/ha-gmc-relay
@@ -29,6 +29,7 @@ options:
   forward: true
   forward_url: https://www.gmcmap.com
   core_url: https://homeassistant:8123
+  core_verify_tls: true
   log_level: info
 schema:
   webhook_id: password
@@ -37,4 +38,5 @@ schema:
   forward: bool
   forward_url: url
   core_url: url
+  core_verify_tls: bool?
   log_level: list(debug|info|warning|error)

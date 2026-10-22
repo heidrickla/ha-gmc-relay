@@ -18,12 +18,12 @@ on port 80. The defaults are Website `www.gmcmap.com`, URL `log2.asp`. Set Websi
 |---|---|
 | Accept | `GET /log2.asp` or `/log2.php` with a numeric `CPM`; `ACPM` and `uSV` optional. Query keys in any letter case. An upload without a finite numeric `CPM` gets 400. |
 | Keep | The reading goes into the history behind the panel. |
-| Check | If `counter_ids` is set, a `GID` not in it is refused with 403 and not forwarded. |
+| Check | A `GID` not in `counter_ids` is refused with 403 and not forwarded. While `counter_ids` is empty every upload is refused, and the log says so once. |
 | Home Assistant | POST `{"cpm", "acpm", "usv", "gid", "aid", "path", "received"}` to the webhook `webhook_id` at `core_url`, straight to core on the apps network. |
 | gmcmap | With `forward` on, the exact request is replayed to `forward_url` and the counter gets gmcmap's reply. |
 | Reply | `OK.ERR0.`, gmcmap's success string, when not forwarding or when gmcmap fails; the reading is already in Home Assistant. |
 
-`GET /healthz` answers `ok` for the watchdog; `GET /status.json` shows the count of readings passed on and the last one.
+`GET /healthz` answers `ok` for the watchdog; `GET /status.json` shows the count of readings passed on and the last one, without its `AID` and `GID`.
 
 ## Panel
 
@@ -66,10 +66,11 @@ time,cpm,acpm,usv,gid
 | Option | Default | Effect |
 |---|---|---|
 | `webhook_id` | | The Home Assistant webhook that receives readings. Any string; keep it private. |
-| `counter_ids` | `[]` | Accepted `GID` values. Empty accepts any counter. |
+| `counter_ids` | `[]` | Accepted `GID` values. Required: empty refuses every upload. |
 | `forward` | true | Replay each upload to `forward_url`. |
 | `forward_url` | `https://www.gmcmap.com` | Where to replay. |
 | `core_url` | `https://homeassistant:8123` | Where the webhook is posted. The default is core as every app reaches it; use `http://` if Home Assistant has no certificate. |
+| `core_verify_tls` | true | Check core's certificate on an `https` `core_url`: against `core-ca.pem` in the app's config folder when it is there, else the system store. The certificate must name the `core_url` host. |
 | `log_level` | info | `debug` logs every request. |
 
 ## Home Assistant side
@@ -103,6 +104,8 @@ template:
 | Symptom | Cause | Fix |
 |---|---|---|
 | Log says `webhook NOT SET` | `webhook_id` empty | Set it and restart. |
+| `webhook refused the reading: 0 ... CERTIFICATE_VERIFY_FAILED` | Core's certificate is not signed by a CA the relay trusts, or does not name the `core_url` host | Put the CA certificate that signed core's certificate in the config folder as `core-ca.pem` and restart, or turn `core_verify_tls` off. |
+| Log says `counter_ids is empty` | No counter listed | Add the counter's `GID`, the `GID` in its uploads, and restart. |
 | `webhook refused the reading` | `core_url` wrong, or Home Assistant restarting | Core answers 200 even for an unknown id, so a refusal is a transport problem, not the id. |
 | Relay says 200 but no state | Webhook id differs from the template trigger, or the trigger is not loaded | Same id on both sides; check the template block loaded. |
 | Nothing arrives | The counter still points at gmcmap, or has no route to this host | Check the counter's Website setting and the LAN. `status.json` counts what arrived. |

@@ -9,7 +9,7 @@ Point the counter's "Website" at this host and it sends the same request
 here. The relay:
 
   1. reads CPM, ACPM and uSV (any letter case), refusing a request whose
-     GID is not in `counter_ids` when that list is set;
+     GID is not in `counter_ids`, and every request while that list is empty;
   2. keeps the reading in its history (SQLite under /data) for the panel's
      graphs;
   3. posts {"cpm", "acpm", "usv", "gid", "aid", "path", "received"} as JSON
@@ -22,7 +22,7 @@ here. The relay:
      "OK.ERR0." itself, gmcmap's success string.
 
 GET /healthz answers "ok" for the watchdog; GET /status.json counts the
-readings passed on and shows the last. Anything else is 404. A second
+readings passed on and shows the last, without its AID and GID. Anything else is 404. A second
 listener serves the panel and its data to Home Assistant's ingress gateway,
 and to nothing else. Standard library only.
 """
@@ -53,6 +53,10 @@ UPLOAD_PATHS = ("/log2.asp", "/log2.php")
 # The Supervisor's ingress gateway; the status listener answers no other address.
 INGRESS_GATEWAY = "172.30.32.2"
 PANEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.html")
+# Core's CA certificate, looked for in the add-on's config folder; absent, the system store is used.
+CORE_CA_FILE = "core-ca.pem"
+# What gmcmap.com needs to take an upload for a counter: not served on port 80.
+COUNTER_KEYS = ("aid", "gid")
 
 RANGES = {
     "24h": 86400,
@@ -277,13 +281,16 @@ class History:
 
 
 class Relay:
-    def __init__(self, options: dict, history: History | None = None):
+    def __init__(self, options: dict, history: History | None = None, config_dir: str = ""):
         self.webhook_id = str(options.get("webhook_id") or "")
         self.counter_ids = {str(c) for c in (options.get("counter_ids") or []) if str(c)}
         self.forward = bool(options.get("forward", True))
         self.forward_url = str(options.get("forward_url") or "https://www.gmcmap.com").rstrip("/")
         self.core_url = str(options.get("core_url") or "https://homeassistant:8123").rstrip("/")
+        self.core_verify_tls = bool(options.get("core_verify_tls", True))
+        self.core_ca_file = os.path.join(config_dir, CORE_CA_FILE) if config_dir else ""
         self.history = history
+        self.warned_no_counters = False
         self.received = 0
         self.last: dict | None = None
         # (status, epoch) of the newest webhook post and gmcmap forward
@@ -291,6 +298,25 @@ class Relay:
         self.forward_result: tuple[int, int] | None = None
 
     # -- Home Assistant -------------------------------------------------------
+    def core_context(self) -> ssl.SSLContext | None:
+        """Core's certificate is checked against `core-ca.pem` in the config folder when it is
+        there, else the system store; `core_verify_tls` off skips the check."""
+        if not self.core_url.startswith("https"):
+            return None
+        if not self.core_verify_tls:
+            return ssl._create_unverified_context()
+        ca = self.core_ca_file if self.core_ca_file and os.path.isfile(self.core_ca_file) else None
+        return ssl.create_default_context(cafile=ca)
+
+    def core_tls(self) -> str:
+        if not self.core_url.startswith("https"):
+            return "plain http"
+        if not self.core_verify_tls:
+            return "not verified"
+        if self.core_ca_file and os.path.isfile(self.core_ca_file):
+            return f"verified against {self.core_ca_file}"
+        return "verified against the system store"
+
     def post_webhook(self, payload: dict) -> tuple[int, str]:
         """Straight to core. A webhook needs no token, and the Supervisor's
         core proxy answers 200 to a webhook POST without delivering it, so the
@@ -304,8 +330,7 @@ class Relay:
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-        # Core's certificate is the house's own; the name is not checkable.
-        ctx = ssl._create_unverified_context() if url.startswith("https") else None
+        ctx = self.core_context()
         try:
             with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
                 return resp.status, ""
@@ -342,7 +367,12 @@ class Relay:
         if reading is None:
             LOG.warning("upload without a CPM value: %s?%s", path, query[:120])
             return 400, b"missing CPM"
-        if self.counter_ids and reading["gid"] not in self.counter_ids:
+        if not self.counter_ids:
+            if not self.warned_no_counters:
+                LOG.error("counter_ids is empty: every upload is refused until it lists the counter's GID")
+                self.warned_no_counters = True
+            return 403, b"no counter configured"
+        if reading["gid"] not in self.counter_ids:
             LOG.warning("upload from unknown counter GID %r refused", reading["gid"])
             return 403, b"unknown counter"
         now = datetime.now(UTC)
@@ -378,6 +408,11 @@ class Relay:
         return 200, OK_REPLY
 
     # -- the panel ------------------------------------------------------------
+    def public_status(self) -> dict:
+        """Port 80's /status.json, which any LAN host can read: the last reading without AID and GID."""
+        last = {k: v for k, v in self.last.items() if k not in COUNTER_KEYS} if self.last else None
+        return {"received": self.received, "last": last, "forward": self.forward}
+
     def status(self) -> dict:
         doc: dict = {
             "received": self.received,
@@ -428,8 +463,7 @@ def make_handler(relay: Relay):
             if parts.path == "/healthz":
                 self._send(200, b"ok\n")
             elif parts.path == "/status.json":
-                doc = {"received": relay.received, "last": relay.last, "forward": relay.forward}
-                self._send(200, json.dumps(doc).encode(), "application/json")
+                self._send(200, json.dumps(relay.public_status()).encode(), "application/json")
             elif parts.path.lower() in UPLOAD_PATHS:
                 status, body = relay.handle_upload(parts.path, parts.query)
                 self._send(status, body)
@@ -560,7 +594,7 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stdout,
     )
     history = History(args.history) if args.history else None
-    relay = Relay(options, history)
+    relay = Relay(options, history, args.config_dir)
     if history is not None:
         if args.config_dir:
             ids = sorted(relay.counter_ids)
@@ -570,10 +604,11 @@ def main(argv: list[str] | None = None) -> int:
             "history %s: %d readings from %d counter(s)", args.history, total, len(history.counters)
         )
     LOG.info(
-        "webhook %s, core %s, counters %s, forward %s",
+        "webhook %s, core %s (TLS %s), counters %s, forward %s",
         "set" if relay.webhook_id else "NOT SET",
         relay.core_url,
-        sorted(relay.counter_ids) or "any",
+        relay.core_tls(),
+        sorted(relay.counter_ids) or "NONE, uploads refused",
         relay.forward_url if relay.forward else "off",
     )
     server = serve(relay, args.port)
