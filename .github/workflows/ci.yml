@@ -84,11 +84,13 @@ jobs:
         run: |
           mkdir -p data
           echo '{"webhook_id": "", "counter_ids": ["2"], "forward": false}' > data/options.json
-          docker run -d --name relay --platform ${{ matrix.platform }} -v "$PWD/data:/data:ro" \
+          # /data is writable as the Supervisor mounts it: the relay keeps history.db there
+          docker run -d --name relay --platform ${{ matrix.platform }} -v "$PWD/data:/data" \
             -p 18080:80 -p 18099:8099 gmc-relay:${{ matrix.arch }}
+          check() { "$@" || { echo "failed: $*"; docker logs relay; exit 1; }; }
           for _ in $(seq 1 60); do curl -sf http://127.0.0.1:18080/healthz && break; sleep 1; done
-          test "$(curl -s http://127.0.0.1:18080/healthz)" = "ok"
-          test "$(curl -s 'http://127.0.0.1:18080/log2.asp?AID=1&GID=2&CPM=21')" = "OK.ERR0."
-          test "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18080/log2.asp?AID=1&GID=3&CPM=21')" = "403"
-          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18099/)" = "403"
+          check test "$(curl -s http://127.0.0.1:18080/healthz)" = "ok"
+          check test "$(curl -s 'http://127.0.0.1:18080/log2.asp?AID=1&GID=2&CPM=21')" = "OK.ERR0."
+          check test "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18080/log2.asp?AID=1&GID=3&CPM=21')" = "403"
+          check test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18099/)" = "403"
           docker logs relay
