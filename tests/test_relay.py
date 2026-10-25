@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import socket
 import ssl
 import subprocess
 import threading
@@ -179,6 +180,27 @@ def status_server(relay, allowed):
     srv = server.serve_status(relay, 0, host="127.0.0.1", allowed=allowed)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return srv, f"http://127.0.0.1:{srv.server_port}"
+
+
+@pytest.mark.parametrize("listener", ["port 80", "ingress"])
+@pytest.mark.parametrize("sent", [b"", b"GET /healthz HTTP/1.0\r\n"], ids=["nothing", "no end"])
+def test_a_connection_that_stops_sending_is_closed(monkeypatch, listener, sent):
+    """The counter opens a second connection after each upload and never writes to it."""
+    monkeypatch.setattr(server, "REQUEST_TIMEOUT", 0.5, raising=False)
+    relay = server.Relay({"webhook_id": "x", "forward": False})
+    if listener == "port 80":
+        srv = server.serve(relay, 0, host="127.0.0.1")
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    else:
+        srv, _ = status_server(relay, ("127.0.0.1",))
+    try:
+        with socket.create_connection(("127.0.0.1", srv.server_port), timeout=5) as conn:
+            conn.sendall(sent)
+            start = time.monotonic()
+            assert conn.recv(1) == b""  # the relay closed its end
+            assert time.monotonic() - start < 3
+    finally:
+        srv.shutdown()
 
 
 def test_panel_is_static_and_fetches_relative_to_the_ingress_path():
@@ -487,6 +509,13 @@ def test_core_certificate_is_checked_against_the_ca_in_the_config_folder(tls_cor
     )  # the certificate does not name it
     other.handle_upload("/log2.asp", UPLOAD)
     assert other.webhook_result[0] == 0
+
+
+def test_an_unreadable_core_ca_refuses_the_webhook_and_still_answers_the_counter(tmp_path):
+    (tmp_path / server.CORE_CA_FILE).write_text("not a certificate\n")
+    relay = tls_relay("https://127.0.0.1:9", str(tmp_path))
+    assert relay.handle_upload("/log2.asp", UPLOAD) == (200, b"OK.ERR0.")
+    assert relay.webhook_result[0] == 0
 
 
 def test_core_verify_tls_off_skips_the_check(tls_core):

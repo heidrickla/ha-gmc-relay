@@ -57,6 +57,10 @@ PANEL_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "panel.htm
 CORE_CA_FILE = "core-ca.pem"
 # What gmcmap.com needs to take an upload for a counter: not served on port 80.
 COUNTER_KEYS = ("aid", "gid")
+# Seconds a connection may sit between reads or writes before the relay closes it. The counter
+# opens a second connection after each upload and never writes to it; without this each one held
+# a descriptor and a thread until the process ran out of descriptors (Errno 24) after ~18 hours.
+REQUEST_TIMEOUT = 10.0
 
 RANGES = {
     "24h": 86400,
@@ -330,8 +334,8 @@ class Relay:
             method="POST",
             headers={"Content-Type": "application/json"},
         )
-        ctx = self.core_context()
         try:
+            ctx = self.core_context()  # an unreadable CA file is an ssl.SSLError, an OSError
             with urllib.request.urlopen(req, timeout=15, context=ctx) as resp:
                 return resp.status, ""
         except urllib.error.HTTPError as err:
@@ -444,6 +448,7 @@ def make_handler(relay: Relay):
     class Handler(BaseHTTPRequestHandler):
         server_version = "gmc-relay"
         sys_version = ""
+        timeout = REQUEST_TIMEOUT
 
         def log_message(self, fmt, *args):
             if LOG.isEnabledFor(logging.DEBUG):
@@ -486,6 +491,7 @@ def make_status_handler(relay: Relay, allowed: tuple[str, ...] = (INGRESS_GATEWA
     class StatusHandler(BaseHTTPRequestHandler):
         server_version = "gmc-relay"
         sys_version = ""
+        timeout = REQUEST_TIMEOUT
 
         def log_message(self, fmt, *args):
             if LOG.isEnabledFor(logging.DEBUG):
