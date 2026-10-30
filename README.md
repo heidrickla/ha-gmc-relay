@@ -5,6 +5,16 @@ A Home Assistant app that receives a GQ GMC Geiger counter's WiFi upload on port
 [![Add the repository to Home Assistant](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fheidrickla%2Fha-gmc-relay)
 [![Open GMC Relay in Home Assistant](https://my.home-assistant.io/badges/supervisor_addon.svg)](https://my.home-assistant.io/redirect/supervisor_addon/?addon=193d9a14_gmc_relay&repository_url=https%3A%2F%2Fgithub.com%2Fheidrickla%2Fha-gmc-relay)
 
+## Screenshots
+
+![The GMC Relay panel with the dose rate now, the last 60 readings, a year of daily averages and the week's figures](docs/images/panel.png)
+
+The panel's top half, with a week of example readings.
+
+![The week's CPM chart, the hour-of-day chart and the count distribution beside a Poisson curve](docs/images/charts.png)
+
+The chosen range as a chart, each hour against the range's average, and the count distribution.
+
 ## Setup
 
 1. Install the Mosquitto broker app and set up the MQTT integration Home Assistant offers for it, if they are not there already.
