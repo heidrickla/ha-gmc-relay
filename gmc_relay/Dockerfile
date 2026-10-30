@@ -21,7 +21,7 @@ ENV PYTHONUNBUFFERED=1
 
 # The Supervisor restarts the app when this fails; /healthz is the port 80 listener's.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD wget -q -O /dev/null http://127.0.0.1/healthz || exit 1
+    CMD ["/bin/sh", "-c", "wget -q -O /dev/null http://127.0.0.1/healthz || exit 1"]
 
 CMD ["/run.sh"]
 
