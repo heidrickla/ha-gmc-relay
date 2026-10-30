@@ -52,7 +52,7 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = logging.getLogger("gmc-relay")
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 REPO_URL = "https://github.com/heidrickla/ha-gmc-relay"
 OK_REPLY = b"OK.ERR0."
 UPLOAD_PATHS = ("/log2.asp", "/log2.php")

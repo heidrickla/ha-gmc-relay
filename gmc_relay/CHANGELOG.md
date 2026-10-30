@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1
+
+- The relay starts with the container's environment, so it reads the Supervisor's MQTT service and the readings reach Home Assistant through the Mosquitto broker app.
+
 ## 0.5.0
 
 - Readings reach Home Assistant with no YAML: through the Mosquitto broker app, the relay publishes each counter as an MQTT discovery device with four sensors (CPM, ACPM, dose rate, last reading). It finds the broker through the Supervisor, and one installed later within 5 minutes.

@@ -89,7 +89,7 @@ jobs:
           echo '{"counter_ids": [], "forward": true, "forward_url": "http://127.0.0.1:9"}' > data/options.json
           # /data is writable as the Supervisor mounts it: the relay keeps history.db there
           docker run -d --name relay --platform ${{ matrix.platform }} -v "$PWD/data:/data" \
-            -p 18080:80 -p 18099:8099 gmc-relay:${{ matrix.arch }}
+            -e SUPERVISOR_TOKEN=ci-token -p 18080:80 -p 18099:8099 gmc-relay:${{ matrix.arch }}
           check() { "$@" || { echo "failed: $*"; docker logs relay; exit 1; }; }
           for _ in $(seq 1 60); do curl -sf http://127.0.0.1:18080/healthz && break; sleep 1; done
           check test "$(curl -s http://127.0.0.1:18080/healthz)" = "ok"
@@ -97,4 +97,6 @@ jobs:
           check test "$(curl -s -o /dev/null -w '%{http_code}' 'http://127.0.0.1:18080/log2.asp?AID=1&GID=3&CPM=21')" = "403"
           check test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18099/)" = "403"
           check test -f data/counters.json
+          # The relay process holds the Supervisor token it finds the MQTT broker with.
+          check docker exec relay sh -c 'tr "\0" "\n" < /proc/$(pgrep -x python3)/environ | grep -qx SUPERVISOR_TOKEN=ci-token'
           docker logs relay

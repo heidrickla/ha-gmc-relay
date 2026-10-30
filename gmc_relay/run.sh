@@ -1,5 +1,7 @@
-#!/bin/sh
-# Options are read by the relay from /data/options.json; nothing rides argv.
+#!/command/with-contenv sh
+# shellcheck shell=sh
+# with-contenv hands over the container's environment, SUPERVISOR_TOKEN included, which S6 overlay
+# keeps from CMD; the relay needs it to find the MQTT broker. Options are read from /data/options.json.
 set -eu
 
 echo "[gmc-relay] serving on :80"
