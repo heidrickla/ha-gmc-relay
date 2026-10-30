@@ -31,7 +31,7 @@ jobs:
         run: >-
           yamllint -d "{extends: relaxed, rules: {line-length: {max: 160}, comments: {min-spaces-from-content: 1}}}"
           repository.yaml gmc_relay/config.yaml gmc_relay/translations/en.yaml
-          .github/workflows/ci.yml .gitea/workflows/validate.yml
+          .github/workflows/ci.yml .gitea/workflows/validate.yml .gitea/workflows/image.yml
       - name: shellcheck
         run: shellcheck gmc_relay/run.sh
       - name: hadolint

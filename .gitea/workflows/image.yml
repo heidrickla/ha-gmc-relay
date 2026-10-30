@@ -1,0 +1,80 @@
+name: Image
+
+# The add-on image for each architecture, as the Supervisor builds it (BuildKit, the add-on folder as
+# the context, BUILD_ARCH), started as a fresh install and probed from inside the container. The
+# runner is shared (capacity 1), so this runs only when the add-on changes. The job reaches the forge
+# host's Docker daemon: the image and container carry the run's id and are removed, and the options go
+# in with docker cp, which needs no path the daemon shares with the job.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "gmc_relay/**"
+      - ".gitea/workflows/image.yml"
+  pull_request:
+    paths:
+      - "gmc_relay/**"
+      - ".gitea/workflows/image.yml"
+  workflow_dispatch:
+
+jobs:
+  image:
+    name: Build and run ${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: aarch64
+            platform: linux/arm64
+    env:
+      TAG: gmc-relay-ci:${{ github.run_id }}-${{ matrix.arch }}
+      NAME: gmc-relay-ci-${{ github.run_id }}-${{ matrix.arch }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        timeout-minutes: 15
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+        timeout-minutes: 10
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        timeout-minutes: 10
+
+      - name: Build
+        timeout-minutes: 20
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./gmc_relay
+          platforms: ${{ matrix.platform }}
+          pull: true
+          build-args: |
+            BUILD_ARCH=${{ matrix.arch }}
+            BUILD_VERSION=ci
+          load: true
+          tags: ${{ env.TAG }}
+          push: false
+
+      # The probe is retried for up to two minutes: under QEMU the first answer can take a while.
+      - name: Run the image
+        timeout-minutes: 10
+        run: |
+          docker image inspect --format '{{.Architecture}}' "$TAG" | grep -qxF "$(basename ${{ matrix.platform }})"
+          mkdir -p "$RUNNER_TEMP/data"
+          echo '{"counter_ids": [], "forward": true, "forward_url": "http://127.0.0.1:9"}' > "$RUNNER_TEMP/data/options.json"
+          docker create --name "$NAME" --platform ${{ matrix.platform }} -e SUPERVISOR_TOKEN=ci "$TAG" > /dev/null
+          docker cp "$RUNNER_TEMP/data/." "$NAME:/data"
+          docker start "$NAME" > /dev/null
+          ok=0
+          for _ in $(seq 1 60); do
+            if docker exec "$NAME" sh -c 'test "$(curl -s http://127.0.0.1/healthz)" = ok'; then ok=1; break; fi
+            sleep 2
+          done
+          docker logs "$NAME" 2>&1 | tail -n 20
+          test "$ok" = 1
+
+      - name: Remove the container and image
+        if: always()
+        run: |
+          docker rm -f "$NAME" > /dev/null 2>&1 || true
+          docker image rm -f "$TAG" > /dev/null 2>&1 || true

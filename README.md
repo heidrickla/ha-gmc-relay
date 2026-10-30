@@ -21,7 +21,7 @@ The chosen range as a chart, each hour against the range's average, and the coun
 2. Add this repository with the first button, then install GMC Relay with the second and start it. No option needs setting.
 3. On the counter, set Website (Menu, WiFi, Website) to the Home Assistant host's LAN address.
 
-The first counter to upload is accepted, and a Geiger counter device appears with `sensor.geiger_meter_cpm`, `sensor.geiger_meter_acpm`, `sensor.geiger_meter_usv` and `sensor.geiger_meter` (last reading). Works with the GMC-320+, 500, 500+, 600 and 600+ with WiFi.
+The first counter to upload is accepted, and a Geiger counter device appears with `sensor.geiger_meter_cpm`, `sensor.geiger_meter_acpm`, `sensor.geiger_meter_usv` and `sensor.geiger_meter` (last reading). Works with the GMC-320+, 500, 500+, 600 and 600+ with WiFi. The app runs on amd64 and aarch64.
 
 ## Options
 
