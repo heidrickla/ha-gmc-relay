@@ -136,6 +136,7 @@ th:first-child, td:first-child { text-align: left; }
 th { color: var(--muted); font-weight: normal; }
 .tablewrap { max-height: 280px; overflow: auto; }
 .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+.notice { margin: 0; padding: 10px 14px; border-radius: 8px; background: var(--raised); color: var(--text); border-left: 3px solid var(--warn); }
 footer { color: var(--muted); font-size: 12px; display: flex; gap: 18px; flex-wrap: wrap; }
 @media (max-width: 860px) {
   .hero, .grid2 { grid-template-columns: minmax(0, 1fr); }
@@ -160,6 +161,7 @@ footer { color: var(--muted); font-size: 12px; display: flex; gap: 18px; flex-wr
       <button id="theme" type="button" aria-label="Switch theme">Light</button>
     </div>
   </header>
+  <p class="notice" id="notice" hidden></p>
 
   <section class="card hero" aria-label="Latest reading">
     <div>
@@ -360,11 +362,19 @@ function renderStatus() {
   $("now-cpm").textContent = last ? fmt(last[1], "cpm") : "–";
   $("now-acpm").textContent = last && last[2] !== null ? fmt(last[2], "cpm") : "–";
   const counters = Object.keys(s.counters || {});
-  setChip("chip-counter", last ? "good" : "", s.gid ? "Counter " + s.gid : "No counter yet");
-  const wr = s.webhook_result;
-  if (!s.webhook_set) setChip("chip-webhook", "bad", "Home Assistant webhook not set");
-  else if (!wr) setChip("chip-webhook", "", "Home Assistant, no post yet");
-  else setChip("chip-webhook", wr[0] >= 200 && wr[0] < 300 ? "good" : "bad", "Home Assistant " + (wr[0] || "unreachable"));
+  const ids = s.counter_ids || [];
+  setChip("chip-counter", last ? "good" : "", s.gid ? "Counter " + s.gid : ids.length ? "Counter " + ids[0] + ", no upload yet" : "No counter yet");
+  const dr = s.delivery_result, via = s.route === "mqtt" ? "MQTT" : "webhook";
+  if (s.route === "none") setChip("chip-webhook", "bad", "Home Assistant: no MQTT broker");
+  else if (!dr) setChip("chip-webhook", "", "Home Assistant by " + via + ", nothing sent yet");
+  else setChip("chip-webhook", dr[0] ? "good" : "bad", "Home Assistant by " + via + (dr[0] ? "" : ", failed"));
+  const notice = $("notice");
+  let text = "";
+  if (s.route === "none") text = s.route_detail.charAt(0).toUpperCase() + s.route_detail.slice(1) + ".";
+  else if (dr && !dr[0]) text = "The last reading did not reach Home Assistant: " + dr[2] + ".";
+  else if (!ids.length) text = "Waiting for the counter's first upload. Set its Website to this Home Assistant host's address (Menu, WiFi, Website); the first counter to upload is accepted.";
+  notice.textContent = text;
+  notice.hidden = !text;
   const fr = s.forward_result;
   if (!s.forward) setChip("chip-forward", "", "gmcmap forward off");
   else if (!fr) setChip("chip-forward", "", "gmcmap, no forward yet");

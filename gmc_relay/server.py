@@ -9,19 +9,20 @@ Point the counter's "Website" at this host and it sends the same request
 here. The relay:
 
   1. reads CPM, ACPM and uSV (any letter case), refusing a request whose
-     GID is not in `counter_ids`, and every request while that list is empty;
+     GID is not an accepted counter: those in `counter_ids`, or, while that
+     option is empty, the first counter to upload, adopted and kept in /data;
   2. keeps the reading in its history (SQLite under /data) for the panel's
      graphs;
-  3. posts {"cpm", "acpm", "usv", "gid", "aid", "path", "received"} as JSON
-     to Home Assistant's webhook `webhook_id`, straight to core on the
-     add-on network, where a trigger-based template sensor turns it into
-     state;
+  3. hands it to Home Assistant: as MQTT discovery entities through the
+     broker the Supervisor offers, or, when `webhook_id` is set, as JSON
+     {"cpm", "acpm", "usv", "gid", "aid", "path", "received"} posted to that
+     webhook straight to core, for a trigger-based template sensor;
   4. when `forward` is on, replays the exact request to `forward_url` and
      answers the counter with gmcmap's own reply, so the public map keeps
      updating and the counter sees the reply it expects; otherwise answers
      "OK.ERR0." itself, gmcmap's success string.
 
-GET /healthz answers "ok" for the watchdog; GET /status.json counts the
+GET /healthz answers "ok" for the health check; GET /status.json counts the
 readings passed on and shows the last, without its AID and GID. Anything else is 404. A second
 listener serves the panel and its data to Home Assistant's ingress gateway,
 and to nothing else. Standard library only.
@@ -32,10 +33,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import csv
+import hashlib
 import json
 import logging
 import math
 import os
+import select
+import socket
 import sqlite3
 import ssl
 import sys
@@ -48,6 +52,8 @@ from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 LOG = logging.getLogger("gmc-relay")
+VERSION = "0.5.0"
+REPO_URL = "https://github.com/heidrickla/ha-gmc-relay"
 OK_REPLY = b"OK.ERR0."
 UPLOAD_PATHS = ("/log2.asp", "/log2.php")
 # The Supervisor's ingress gateway; the status listener answers no other address.
@@ -61,6 +67,27 @@ COUNTER_KEYS = ("aid", "gid")
 # opens a second connection after each upload and never writes to it; without this each one held
 # a descriptor and a thread until the process ran out of descriptors (Errno 24) after ~18 hours.
 REQUEST_TIMEOUT = 10.0
+
+SUPERVISOR_URL = "http://supervisor"
+DISCOVERY_PREFIX = "homeassistant"
+TOPIC_ROOT = "gmc_relay"
+AVAILABILITY_TOPIC = f"{TOPIC_ROOT}/status"
+# Seconds between looks for a broker while there is none, so one installed later is found.
+MQTT_LOOKUP_INTERVAL = 300.0
+MQTT_KEEPALIVE = 60
+ICON = "mdi:radioactive-circle-outline"
+# field, name, unit, device class, the entity id asked for. The ids are those of the template
+# sensors earlier releases documented, so an install moving off that template keeps its history.
+SENSORS = (
+    ("cpm", "CPM", "CPM", None, "sensor.geiger_meter_cpm"),
+    ("acpm", "ACPM", "CPM", None, "sensor.geiger_meter_acpm"),
+    ("usv", "Dose rate", "μSv/h", None, "sensor.geiger_meter_usv"),
+    ("received", "Last reading", None, "timestamp", "sensor.geiger_meter"),
+)
+NO_ROUTE = (
+    "no MQTT broker app is installed and webhook_id is empty, so readings stay here; "
+    "install the Mosquitto broker app and the relay finds it within 5 minutes"
+)
 
 RANGES = {
     "24h": 86400,
@@ -284,22 +311,337 @@ class History:
         return [list(r) for r in rows]
 
 
+# --------------------------------------------------------------------- MQTT
+def _mqtt_str(value: str | bytes) -> bytes:
+    data = value.encode() if isinstance(value, str) else value
+    return len(data).to_bytes(2, "big") + data
+
+
+def _mqtt_packet(header: int, body: bytes) -> bytes:
+    out, n = bytearray([header]), len(body)
+    while True:
+        n, byte = divmod(n, 128)
+        out.append(byte | (0x80 if n else 0))
+        if not n:
+            return bytes(out) + body
+
+
+def mqtt_connect(client_id: str, keepalive: int, username: str = "", password: str = "") -> bytes:
+    """CONNECT, MQTT 3.1.1, clean session, with a retained "offline" will on the status topic."""
+    flags = 0x02 | 0x04 | 0x20
+    payload = _mqtt_str(client_id) + _mqtt_str(AVAILABILITY_TOPIC) + _mqtt_str("offline")
+    if username:
+        flags |= 0x80
+        payload += _mqtt_str(username)
+        if password:
+            flags |= 0x40
+            payload += _mqtt_str(password)
+    header = _mqtt_str("MQTT") + bytes([4, flags]) + keepalive.to_bytes(2, "big")
+    return _mqtt_packet(0x10, header + payload)
+
+
+def mqtt_publish(topic: str, payload: bytes, retain: bool = True) -> bytes:
+    """PUBLISH at QoS 0."""
+    return _mqtt_packet(0x30 | (0x01 if retain else 0), _mqtt_str(topic) + payload)
+
+
+MQTT_PINGREQ = b"\xc0\x00"
+
+
+class MqttError(OSError):
+    """The broker refused the connection."""
+
+
+class MqttPublisher:
+    """A publish-only MQTT 3.1.1 client at QoS 0; retained discovery and state need no more.
+    It connects on first use and again after the connection drops."""
+
+    def __init__(
+        self,
+        host: str,
+        port: int = 1883,
+        username: str = "",
+        password: str = "",
+        tls: bool = False,
+        keepalive: int = MQTT_KEEPALIVE,
+    ):
+        self.host, self.port, self.tls, self.keepalive = host, port, tls, keepalive
+        self.username, self.password = username, password
+        self.client_id = f"gmc_relay_{socket.gethostname()}"[:23]
+        self.lock = threading.Lock()
+        self.sock: socket.socket | None = None
+        self.connections = 0
+        self.last_sent = 0.0
+
+    def _open(self) -> None:
+        sock = socket.create_connection((self.host, self.port), timeout=10)
+        try:
+            if self.tls:
+                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host)
+            sock.sendall(mqtt_connect(self.client_id, self.keepalive, self.username, self.password))
+            ack = b""
+            while len(ack) < 4:
+                chunk = sock.recv(4 - len(ack))
+                if not chunk:
+                    raise MqttError("the broker closed the connection before CONNACK")
+                ack += chunk
+            if ack[0] != 0x20 or ack[3] != 0:
+                raise MqttError(f"the broker refused the connection (CONNACK code {ack[3]})")
+        except BaseException:
+            sock.close()
+            raise
+        self.sock = sock
+        self.connections += 1
+        self._write(mqtt_publish(AVAILABILITY_TOPIC, b"online"))
+
+    def _write(self, data: bytes) -> None:
+        assert self.sock is not None
+        self.sock.sendall(data)
+        self.last_sent = time.monotonic()
+
+    def _alive(self) -> bool:
+        """False once the broker has closed its end; reads away what it sent (PINGRESP)."""
+        if self.sock is None:
+            return False
+        try:
+            while select.select([self.sock], [], [], 0)[0]:
+                if not self.sock.recv(4096):
+                    return False
+        except OSError:
+            return False
+        return True
+
+    def _close(self) -> None:
+        if self.sock is not None:
+            with contextlib.suppress(OSError):
+                self.sock.close()
+        self.sock = None
+
+    def connect(self) -> int:
+        """Opens the connection unless it is up; returns its number, counting from 1.
+        Raises OSError when the broker cannot be reached or refuses the connection."""
+        with self.lock:
+            self._ensure()
+            return self.connections
+
+    def _ensure(self) -> None:
+        if not self._alive():
+            self._close()
+            self._open()
+
+    def publish(self, topic: str, payload: bytes, retain: bool = True) -> None:
+        """Raises OSError when the broker cannot be reached or refuses the connection."""
+        with self.lock:
+            for attempt in (1, 2):
+                self._ensure()
+                try:
+                    self._write(mqtt_publish(topic, payload, retain))
+                    return
+                except OSError:
+                    self._close()
+                    if attempt == 2:
+                        raise
+
+    def keep_alive(self) -> None:
+        """A PINGREQ once nothing has gone out for half the keepalive; called every few seconds."""
+        with self.lock:
+            if self.sock is None or time.monotonic() - self.last_sent < self.keepalive / 2:
+                return
+            if not self._alive():
+                self._close()
+                return
+            try:
+                self._write(MQTT_PINGREQ)
+            except OSError:
+                self._close()
+
+
+def counter_key(gid: str) -> str:
+    """The GID is what gmcmap needs to take an upload for a counter; topics and ids carry a hash."""
+    return hashlib.sha256(gid.encode()).hexdigest()[:12]
+
+
+class MqttDelivery:
+    """Readings as Home Assistant entities through MQTT discovery, one device per counter."""
+
+    def __init__(self, publisher: MqttPublisher, prefix: str = DISCOVERY_PREFIX):
+        self.publisher = publisher
+        self.prefix = prefix
+        # counter key -> the connection its discovery went out on; a new connection re-announces
+        self.announced: dict[str, int] = {}
+
+    @staticmethod
+    def discovery(key: str) -> dict:
+        node = f"gmc_relay_{key}"
+        components = {}
+        for field, name, unit, device_class, entity_id in SENSORS:
+            component = {
+                "platform": "sensor",
+                "name": name,
+                "unique_id": f"{node}_{field}",
+                "default_entity_id": entity_id,
+                "icon": ICON,
+                "value_template": f"{{{{ value_json.{field} }}}}",
+            }
+            if unit:
+                component["unit_of_measurement"] = unit
+                component["state_class"] = "measurement"
+            if device_class:
+                component["device_class"] = device_class
+            components[component["unique_id"]] = component
+        return {
+            "device": {
+                "identifiers": [node],
+                "name": "Geiger counter",
+                "manufacturer": "GQ Electronics",
+                "model": "GMC",
+            },
+            "origin": {"name": "GMC Relay", "sw_version": VERSION, "support_url": REPO_URL},
+            "state_topic": f"{TOPIC_ROOT}/{key}/state",
+            "availability_topic": AVAILABILITY_TOPIC,
+            "components": components,
+        }
+
+    def send(self, payload: dict) -> None:
+        key = counter_key(payload["gid"])
+        connection = self.publisher.connect()
+        if self.announced.get(key) != connection:
+            topic = f"{self.prefix}/device/gmc_relay_{key}/config"
+            self.publisher.publish(topic, json.dumps(self.discovery(key)).encode())
+            self.announced[key] = connection
+        state = {field: payload.get(field) for field, *_ in SENSORS}
+        self.publisher.publish(f"{TOPIC_ROOT}/{key}/state", json.dumps(state).encode())
+
+
+def supervisor_mqtt_service(token: str | None = None, url: str = SUPERVISOR_URL) -> dict | None:
+    """The broker the Supervisor offers (the Mosquitto broker app), as MqttPublisher arguments."""
+    token = os.environ.get("SUPERVISOR_TOKEN", "") if token is None else token
+    if not token:
+        return None
+    req = urllib.request.Request(
+        f"{url}/services/mqtt", headers={"Authorization": f"Bearer {token}"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.load(resp).get("data") or {}
+    except (OSError, ValueError, AttributeError) as err:
+        LOG.debug("the Supervisor offers no MQTT broker: %s", err)
+        return None
+    if not data.get("host"):
+        return None
+    return {
+        "host": str(data["host"]),
+        "port": int(data.get("port") or 1883),
+        "username": str(data.get("username") or ""),
+        "password": str(data.get("password") or ""),
+        "tls": bool(data.get("ssl")),
+    }
+
+
 class Relay:
-    def __init__(self, options: dict, history: History | None = None, config_dir: str = ""):
+    def __init__(
+        self,
+        options: dict,
+        history: History | None = None,
+        config_dir: str = "",
+        counters_file: str = "",
+        find_mqtt=None,
+    ):
         self.webhook_id = str(options.get("webhook_id") or "")
+        # counter_ids when set; otherwise the counter adopted from the first upload, kept in a file
+        self.counters_file = counters_file
         self.counter_ids = {str(c) for c in (options.get("counter_ids") or []) if str(c)}
+        self.adopted = not self.counter_ids
+        if self.adopted:
+            self.counter_ids = self.load_adopted()
+        # Returns MqttPublisher arguments or None; looked up again while there is no broker.
+        self.find_mqtt = find_mqtt
+        self.mqtt: MqttDelivery | None = None
+        self.next_lookup = 0.0
+        self.route_lock = threading.Lock()
         self.forward = bool(options.get("forward", True))
         self.forward_url = str(options.get("forward_url") or "https://www.gmcmap.com").rstrip("/")
         self.core_url = str(options.get("core_url") or "https://homeassistant:8123").rstrip("/")
         self.core_verify_tls = bool(options.get("core_verify_tls", True))
         self.core_ca_file = os.path.join(config_dir, CORE_CA_FILE) if config_dir else ""
         self.history = history
-        self.warned_no_counters = False
+        self.warned_no_route = False
         self.received = 0
         self.last: dict | None = None
-        # (status, epoch) of the newest webhook post and gmcmap forward
-        self.webhook_result: tuple[int, int] | None = None
+        # (delivered, epoch, detail) of the newest hand-over to Home Assistant
+        self.delivery_result: tuple[bool, int, str] | None = None
+        # (status, epoch) of the newest gmcmap forward
         self.forward_result: tuple[int, int] | None = None
+
+    # -- counters -------------------------------------------------------------
+    def load_adopted(self) -> set[str]:
+        if not self.counters_file or not os.path.isfile(self.counters_file):
+            return set()
+        try:
+            with open(self.counters_file, encoding="utf-8") as fh:
+                doc = json.load(fh)
+        except (OSError, ValueError) as err:
+            LOG.error("could not read the adopted counter from %s: %s", self.counters_file, err)
+            return set()
+        ids = doc.get("counter_ids", []) if isinstance(doc, dict) else []
+        return {str(c) for c in ids if str(c)}
+
+    def adopt(self, gid: str) -> None:
+        self.counter_ids = {gid}
+        LOG.info(
+            "counter %s adopted from its first upload; list counters in counter_ids to change it",
+            gid,
+        )
+        if not self.counters_file:
+            return
+        try:
+            tmp = self.counters_file + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"counter_ids": [gid]}, fh)
+            os.replace(tmp, self.counters_file)
+        except OSError as err:
+            LOG.error("could not keep the adopted counter in %s: %s", self.counters_file, err)
+
+    # -- the route into Home Assistant ----------------------------------------
+    def route(self) -> str:
+        if self.webhook_id:
+            return "webhook"
+        return "mqtt" if self.mqtt_route() is not None else "none"
+
+    def mqtt_route(self) -> MqttDelivery | None:
+        with self.route_lock:
+            now = time.monotonic()
+            if self.mqtt is None and self.find_mqtt is not None and now >= self.next_lookup:
+                self.next_lookup = now + MQTT_LOOKUP_INTERVAL
+                service = self.find_mqtt()
+                if service:
+                    self.mqtt = MqttDelivery(MqttPublisher(**service))
+                    LOG.info("MQTT broker %s:%s found", service["host"], service["port"])
+            return self.mqtt
+
+    def describe_route(self) -> str:
+        route = self.route()
+        if route == "webhook":
+            return f"webhook at {self.core_url} (TLS {self.core_tls()})"
+        if route == "mqtt" and self.mqtt is not None:
+            return f"MQTT discovery through {self.mqtt.publisher.host}:{self.mqtt.publisher.port}"
+        return NO_ROUTE
+
+    def deliver(self, payload: dict) -> tuple[bool, str]:
+        """By the webhook when webhook_id is set, else by MQTT discovery."""
+        if self.webhook_id:
+            status, detail = self.post_webhook(payload)
+            if 200 <= status < 300:
+                return True, f"webhook {status}"
+            return False, f"webhook refused the reading: {status} {detail}"
+        mqtt = self.mqtt_route()
+        if mqtt is None:
+            return False, NO_ROUTE
+        try:
+            mqtt.send(payload)
+        except OSError as err:
+            return False, f"MQTT broker {mqtt.publisher.host}:{mqtt.publisher.port}: {err}"
+        return True, "MQTT"
 
     # -- Home Assistant -------------------------------------------------------
     def core_context(self) -> ssl.SSLContext | None:
@@ -371,13 +713,8 @@ class Relay:
         if reading is None:
             LOG.warning("upload without a CPM value: %s?%s", path, query[:120])
             return 400, b"missing CPM"
-        if not self.counter_ids:
-            if not self.warned_no_counters:
-                LOG.error(
-                    "counter_ids is empty: uploads are refused until it lists the counter's GID"
-                )
-                self.warned_no_counters = True
-            return 403, b"no counter configured"
+        if not self.counter_ids and reading["gid"]:
+            self.adopt(reading["gid"])
         if reading["gid"] not in self.counter_ids:
             LOG.warning("upload from unknown counter GID %r refused", reading["gid"])
             return 403, b"unknown counter"
@@ -388,20 +725,23 @@ class Relay:
             "path": path,
             "received": now.isoformat(timespec="seconds"),
         }
-        status, detail = self.post_webhook(payload)
-        self.webhook_result = (status, int(now.timestamp()))
-        if 200 <= status < 300:
+        delivered, detail = self.deliver(payload)
+        self.delivery_result = (delivered, int(now.timestamp()), detail)
+        if delivered:
             self.received += 1
             self.last = payload
             LOG.info(
-                "CPM %s ACPM %s uSv/h %s -> webhook %d",
+                "CPM %s ACPM %s uSv/h %s -> %s",
                 reading["cpm"],
                 reading["acpm"],
                 reading["usv"],
-                status,
+                detail,
             )
-        else:
-            LOG.error("webhook refused the reading: %s %s", status, detail)
+        elif detail != NO_ROUTE:
+            LOG.error("Home Assistant did not get the reading: %s", detail)
+        elif not self.warned_no_route:
+            LOG.error(NO_ROUTE)
+            self.warned_no_route = True
         if not self.forward:
             return 200, OK_REPLY
         up_status, body = self.forward_upstream(path, query)
@@ -425,9 +765,12 @@ class Relay:
             "last": self.last,
             "forward": self.forward,
             "forward_url": self.forward_url if self.forward else None,
-            "webhook_set": bool(self.webhook_id),
-            "webhook_result": self.webhook_result,
+            "route": self.route(),
+            "route_detail": self.describe_route(),
+            "delivery_result": self.delivery_result,
             "forward_result": self.forward_result,
+            "counter_ids": sorted(self.counter_ids),
+            "adopted": self.adopted,
             "now": int(time.time()),
             "counters": {},
             "gid": None,
@@ -587,6 +930,14 @@ def import_pending(history: History, config_dir: str, default_gid: str) -> None:
     LOG.info("imported %s: %d added, %d already there, %d unreadable", path, added, dup, bad)
 
 
+def keep_alive(relay: Relay, every: float = 5.0) -> None:
+    """Keeps an idle MQTT connection open between uploads that may be many minutes apart."""
+    tick = threading.Event()
+    while not tick.wait(every):
+        if relay.mqtt is not None:
+            relay.mqtt.publisher.keep_alive()
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--options", required=True)
@@ -594,6 +945,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ingress-port", type=int, default=0, help="status page for ingress; 0 is off")
     ap.add_argument("--history", default="", help="SQLite file for the panel's graphs")
     ap.add_argument("--config-dir", default="", help="folder searched for import.csv at start")
+    ap.add_argument("--counters", default="", help="where the adopted counter is kept")
     args = ap.parse_args(argv)
     options = load_options(args.options)
     logging.basicConfig(
@@ -602,7 +954,7 @@ def main(argv: list[str] | None = None) -> int:
         stream=sys.stdout,
     )
     history = History(args.history) if args.history else None
-    relay = Relay(options, history, args.config_dir)
+    relay = Relay(options, history, args.config_dir, args.counters, supervisor_mqtt_service)
     if history is not None:
         if args.config_dir:
             ids = sorted(relay.counter_ids)
@@ -612,13 +964,12 @@ def main(argv: list[str] | None = None) -> int:
             "history %s: %d readings from %d counter(s)", args.history, total, len(history.counters)
         )
     LOG.info(
-        "webhook %s, core %s (TLS %s), counters %s, forward %s",
-        "set" if relay.webhook_id else "NOT SET",
-        relay.core_url,
-        relay.core_tls(),
-        sorted(relay.counter_ids) or "NONE, uploads refused",
+        "Home Assistant: %s; counters %s; forward %s",
+        relay.describe_route(),
+        sorted(relay.counter_ids) or "none yet, the first to upload is adopted",
         relay.forward_url if relay.forward else "off",
     )
+    threading.Thread(target=keep_alive, args=(relay,), daemon=True).start()
     server = serve(relay, args.port)
     LOG.info("listening on :%d", args.port)
     if args.ingress_port:

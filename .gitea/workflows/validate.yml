@@ -38,7 +38,7 @@ jobs:
         timeout-minutes: 15
         run: >-
           "$RUNNER_TEMP/venv/bin/yamllint" -d "{extends: relaxed, rules: {line-length: {max: 160}, comments: {min-spaces-from-content: 1}}}"
-          repository.yaml gmc_relay/config.yaml gmc_relay/build.yaml gmc_relay/translations/en.yaml
+          repository.yaml gmc_relay/config.yaml gmc_relay/translations/en.yaml
           .gitea/workflows/validate.yml .github/workflows/ci.yml
 
       - name: shellcheck
@@ -63,3 +63,17 @@ jobs:
           name: test-results-${{ github.job }}
           path: reports/
           retention-days: 14
+
+  # A job of its own: after setup-python the forge's runner hands its glibc
+  # toolcache PATH to the linter's Alpine container, where Python cannot load.
+  app-lint:
+    name: App linter
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        timeout-minutes: 15
+      - name: App linter
+        timeout-minutes: 15
+        uses: frenck/action-app-linter@b9cfd1bc62ba60d2c4fc96317b5f7ada5923f4a7 # v2.21.1
+        with:
+          path: ./gmc_relay

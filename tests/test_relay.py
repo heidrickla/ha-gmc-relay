@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
+import pathlib
+import re
 import socket
 import ssl
 import subprocess
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -324,11 +328,11 @@ def test_import_pending_renames_the_file_once_read(tmp_path):
     assert h.counters == {"g1": [1, T0]}
 
 
-def test_upload_is_kept_even_when_the_webhook_refuses(tmp_path):
+def test_upload_is_kept_even_when_home_assistant_does_not_get_it(tmp_path):
     h = server.History(str(tmp_path / "h.db"))
     relay = server.Relay({"webhook_id": "", "forward": False, "counter_ids": ["7"]}, h)
     assert relay.handle_upload("/log2.asp", "GID=7&CPM=21&ACPM=15&uSV=0.13")[0] == 200
-    assert relay.received == 0 and relay.webhook_result[0] == 0
+    assert relay.received == 0 and relay.delivery_result[0] is False
     assert h.counters["7"][0] == 1
     assert h.latest("7")[0][1:] == [21.0, 15.0, 0.13]
     relay.handle_upload("/log2.asp", "GID=8&CPM=21")
@@ -352,7 +356,7 @@ def test_panel_api_serves_status_history_and_refuses_bad_input(tmp_path):
     try:
         st = json.loads(get(f"{base}/api/status")[1])
         assert st["gid"] == "g1" and st["recent"][-1] == [now - 60, 14.0, None, 0.08]
-        assert st["counters"] == {"g1": {"n": 2, "last": now - 60}} and st["webhook_set"]
+        assert st["counters"] == {"g1": {"n": 2, "last": now - 60}} and st["route"] == "webhook"
         doc = json.loads(get(f"{base}/api/history?range=24h")[1])
         assert doc["gid"] == "g1" and doc["stats"]["n"] == 2
         assert json.loads(get(f"{base}/api/history?range=7d&gid=g1")[1])["range"] == "7d"
@@ -368,28 +372,28 @@ def test_panel_api_serves_status_history_and_refuses_bad_input(tmp_path):
 
 
 # --------------------------------------------------------------------- counters, status, TLS
-def test_an_empty_counter_list_refuses_every_upload_and_says_so_once(tmp_path, caplog):
-    FakeGmcmap.gets.clear()
-    core = spin(FakeCore)
-    h = server.History(str(tmp_path / "h.db"))
-    relay = server.Relay(
-        {
-            "webhook_id": WEBHOOK,
-            "core_url": f"http://127.0.0.1:{core.server_port}",
-            "forward": True,
-            "forward_url": "http://127.0.0.1:9",
-        },
-        h,
-    )
-    n = len(FakeCore.posts)
-    try:
-        for _ in range(3):
-            assert relay.handle_upload("/log2.asp", UPLOAD) == (403, b"no counter configured")
-    finally:
-        core.shutdown()
-    assert len(FakeCore.posts) == n and FakeGmcmap.gets == [] and h.counters == {}
-    assert relay.received == 0 and relay.forward_result is None
-    assert sum("counter_ids is empty" in r.message for r in caplog.records) == 1
+def test_the_first_counter_to_upload_is_adopted_and_kept(tmp_path, caplog):
+    caplog.set_level("INFO", logger="gmc-relay")
+    kept = tmp_path / "counters.json"
+    relay = server.Relay({"webhook_id": "", "forward": False}, None, "", str(kept))
+    assert relay.counter_ids == set() and relay.adopted
+    assert relay.handle_upload("/log2.asp", "GID=7&CPM=21") == (200, b"OK.ERR0.")
+    assert relay.counter_ids == {"7"} and json.loads(kept.read_text()) == {"counter_ids": ["7"]}
+    assert relay.handle_upload("/log2.asp", "GID=8&CPM=21") == (403, b"unknown counter")
+    assert sum("adopted" in r.message for r in caplog.records) == 1
+    # a restart reads the adopted counter back
+    again = server.Relay({"webhook_id": "", "forward": False}, None, "", str(kept))
+    assert again.counter_ids == {"7"} and again.handle_upload("/log2.asp", "GID=8&CPM=1")[0] == 403
+    # counter_ids, when set, is the list and the adopted one is not consulted
+    listed = server.Relay({"counter_ids": ["8"], "forward": False}, None, "", str(kept))
+    assert listed.counter_ids == {"8"} and not listed.adopted
+    assert listed.handle_upload("/log2.asp", "GID=7&CPM=1")[0] == 403
+
+
+def test_an_upload_without_a_gid_is_not_adopted(tmp_path):
+    relay = server.Relay({"forward": False}, None, "", str(tmp_path / "counters.json"))
+    assert relay.handle_upload("/log2.asp", "CPM=21")[0] == 403
+    assert relay.counter_ids == set() and not (tmp_path / "counters.json").exists()
 
 
 def test_port_80_status_leaves_out_the_counter_keys_and_ingress_keeps_them(stack):
@@ -493,7 +497,7 @@ def test_core_certificate_is_verified_by_default(tls_core, tmp_path):
     n = len(FakeCore.posts)
     relay = tls_relay(url, str(tmp_path))  # no core-ca.pem: the system store does not know the CA
     assert relay.handle_upload("/log2.asp", UPLOAD) == (200, b"OK.ERR0.")
-    assert relay.webhook_result[0] == 0 and len(FakeCore.posts) == n
+    assert relay.delivery_result[0] is False and len(FakeCore.posts) == n
     assert tls_relay(url).core_context().verify_mode == ssl.CERT_REQUIRED
 
 
@@ -503,23 +507,297 @@ def test_core_certificate_is_checked_against_the_ca_in_the_config_folder(tls_cor
     n = len(FakeCore.posts)
     relay = tls_relay(url, str(tmp_path))
     relay.handle_upload("/log2.asp", UPLOAD)
-    assert relay.webhook_result[0] == 200 and len(FakeCore.posts) == n + 1
+    assert relay.delivery_result[2] == "webhook 200" and len(FakeCore.posts) == n + 1
     other = tls_relay(
         url.replace("127.0.0.1", "localhost"), str(tmp_path)
     )  # the certificate does not name it
     other.handle_upload("/log2.asp", UPLOAD)
-    assert other.webhook_result[0] == 0
+    assert other.delivery_result[0] is False
 
 
 def test_an_unreadable_core_ca_refuses_the_webhook_and_still_answers_the_counter(tmp_path):
     (tmp_path / server.CORE_CA_FILE).write_text("not a certificate\n")
     relay = tls_relay("https://127.0.0.1:9", str(tmp_path))
     assert relay.handle_upload("/log2.asp", UPLOAD) == (200, b"OK.ERR0.")
-    assert relay.webhook_result[0] == 0
+    assert relay.delivery_result[0] is False
 
 
 def test_core_verify_tls_off_skips_the_check(tls_core):
     url, _ = tls_core
     relay = tls_relay(url, core_verify_tls=False)
     relay.handle_upload("/log2.asp", UPLOAD)
-    assert relay.webhook_result[0] == 200
+    assert relay.delivery_result[2] == "webhook 200"
+
+
+# --------------------------------------------------------------------- MQTT
+class FakeBroker:
+    """Accepts MQTT 3.1.1 clients, answers CONNECT and PINGREQ, and records every packet."""
+
+    def __init__(self, refuse: int = 0):
+        self.refuse = refuse
+        self.packets: list[tuple[int, bytes]] = []
+        self.conns: list[socket.socket] = []
+        self.sock = socket.create_server(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._accept, daemon=True).start()
+
+    def _accept(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            self.conns.append(conn)
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+
+    @staticmethod
+    def _read(conn, n):
+        data = b""
+        while len(data) < n:
+            chunk = conn.recv(n - len(data))
+            if not chunk:
+                raise ConnectionError
+            data += chunk
+        return data
+
+    def _serve(self, conn):
+        try:
+            while True:
+                header = self._read(conn, 1)[0]
+                length, shift = 0, 0
+                while True:
+                    byte = self._read(conn, 1)[0]
+                    length |= (byte & 0x7F) << shift
+                    shift += 7
+                    if not byte & 0x80:
+                        break
+                body = self._read(conn, length)
+                self.packets.append((header, body))
+                if header == 0x10:
+                    conn.sendall(bytes([0x20, 2, 0, self.refuse]))
+                elif header == 0xC0:
+                    conn.sendall(b"\xd0\x00")
+        except OSError:  # ConnectionError included: the client went away
+            pass
+
+    def publishes(self):
+        out = []
+        for header, body in self.packets:
+            if header & 0xF0 == 0x30:
+                n = int.from_bytes(body[:2], "big")
+                out.append((body[2 : 2 + n].decode(), body[2 + n :], bool(header & 1)))
+        return out
+
+    def drop_all(self):
+        for conn in self.conns:
+            with contextlib.suppress(OSError):
+                conn.shutdown(socket.SHUT_RDWR)
+                conn.close()
+
+    def close(self):
+        self.drop_all()
+        self.sock.close()
+
+
+@pytest.fixture
+def broker():
+    b = FakeBroker()
+    yield b
+    b.close()
+
+
+def wait_for(cond, timeout=5.0):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if cond():
+            return True
+        time.sleep(0.02)
+    return cond()
+
+
+def mqtt_relay(broker, tmp_path, **options):
+    service = {"host": "127.0.0.1", "port": broker.port, "username": "addons", "password": "pw"}
+    return server.Relay(
+        {"forward": False, **options},
+        server.History(str(tmp_path / "h.db")),
+        "",
+        str(tmp_path / "counters.json"),
+        lambda: service,
+    )
+
+
+def test_without_a_webhook_readings_become_mqtt_discovery_entities(broker, tmp_path):
+    relay = mqtt_relay(broker, tmp_path)
+    assert relay.handle_upload("/log2.asp", UPLOAD) == (200, b"OK.ERR0.")
+    assert relay.delivery_result[0] is True and relay.delivery_result[2] == "MQTT"
+    assert relay.received == 1
+    key = server.counter_key("01234567890")
+    assert wait_for(lambda: len(broker.publishes()) == 3)
+    connect = broker.packets[0]
+    assert connect[0] == 0x10 and b"gmc_relay/status" in connect[1] and b"offline" in connect[1]
+    assert connect[1].endswith(b"\x00\x06addons\x00\x02pw")
+    (avail, config, state) = broker.publishes()
+    assert avail == ("gmc_relay/status", b"online", True)
+    assert config[0] == f"homeassistant/device/gmc_relay_{key}/config" and config[2]
+    doc = json.loads(config[1])
+    assert doc["state_topic"] == f"gmc_relay/{key}/state" and doc["origin"]["sw_version"]
+    by_entity = {c["default_entity_id"]: c for c in doc["components"].values()}
+    assert set(by_entity) == {
+        "sensor.geiger_meter",
+        "sensor.geiger_meter_cpm",
+        "sensor.geiger_meter_acpm",
+        "sensor.geiger_meter_usv",
+    }
+    # units and classes as the template sensors had them, so the recorder's statistics continue
+    assert by_entity["sensor.geiger_meter_usv"]["unit_of_measurement"] == "μSv/h"
+    assert by_entity["sensor.geiger_meter_cpm"]["unit_of_measurement"] == "CPM"
+    assert by_entity["sensor.geiger_meter_cpm"]["state_class"] == "measurement"
+    assert by_entity["sensor.geiger_meter"]["device_class"] == "timestamp"
+    assert all(c["unique_id"].startswith(f"gmc_relay_{key}_") for c in by_entity.values())
+    # the GID and AID stay off the broker
+    assert b"01234567890" not in config[1] and b"01234" not in state[1]
+    assert state[0] == f"gmc_relay/{key}/state" and state[2]
+    reading = json.loads(state[1])
+    assert reading["cpm"] == 21 and reading["acpm"] == 15.02 and reading["usv"] == 0.13
+    assert set(reading) == {"cpm", "acpm", "usv", "received"}
+    # the next reading is state only; discovery went out on this connection already
+    relay.handle_upload("/log2.asp", UPLOAD)
+    assert wait_for(lambda: len(broker.publishes()) == 4)
+    assert broker.publishes()[-1][0] == f"gmc_relay/{key}/state"
+
+
+def test_a_dropped_broker_connection_is_reopened_and_discovery_sent_again(broker, tmp_path):
+    relay = mqtt_relay(broker, tmp_path)
+    relay.handle_upload("/log2.asp", UPLOAD)
+    assert wait_for(lambda: len(broker.publishes()) == 3)
+    broker.drop_all()
+    time.sleep(0.1)
+    assert relay.handle_upload("/log2.asp", UPLOAD)[0] == 200
+    assert relay.delivery_result[0] is True
+    assert wait_for(lambda: len(broker.publishes()) == 6), broker.publishes()
+    assert [p[0].split("/")[-1] for p in broker.publishes()[3:]] == ["status", "config", "state"]
+    assert relay.mqtt.publisher.connections == 2
+
+
+def test_a_broker_that_refuses_the_login_is_a_logged_failure(tmp_path, caplog):
+    b = FakeBroker(refuse=5)
+    try:
+        relay = mqtt_relay(b, tmp_path)
+        assert relay.handle_upload("/log2.asp", UPLOAD) == (200, b"OK.ERR0.")
+        assert relay.delivery_result[0] is False and "CONNACK code 5" in relay.delivery_result[2]
+        assert relay.received == 0 and relay.history.counters["01234567890"][0] == 1
+        assert any("did not get the reading" in r.message for r in caplog.records)
+    finally:
+        b.close()
+
+
+def test_an_idle_connection_is_kept_open_with_pings(broker, tmp_path):
+    relay = mqtt_relay(broker, tmp_path)
+    relay.handle_upload("/log2.asp", UPLOAD)
+    publisher = relay.mqtt.publisher
+    publisher.keep_alive()  # just sent: nothing to do
+    assert not any(h == 0xC0 for h, _ in broker.packets)
+    publisher.last_sent -= publisher.keepalive
+    publisher.keep_alive()
+    assert wait_for(lambda: any(h == 0xC0 for h, _ in broker.packets))
+    publisher.last_sent -= publisher.keepalive
+    time.sleep(0.1)
+    publisher.keep_alive()  # reads the PINGRESP away and pings again on the same connection
+    assert wait_for(lambda: sum(h == 0xC0 for h, _ in broker.packets) == 2)
+    assert publisher.connections == 1
+
+
+def test_with_no_broker_and_no_webhook_the_relay_says_what_is_missing(tmp_path, caplog):
+    calls = []
+    found: list[dict] = []
+
+    def find():
+        calls.append(1)
+        return found[0] if found else None
+
+    relay = server.Relay({"forward": False}, server.History(str(tmp_path / "h.db")), "", "", find)
+    for _ in range(3):
+        assert relay.handle_upload("/log2.asp", UPLOAD) == (200, b"OK.ERR0.")
+    assert relay.route() == "none" and relay.describe_route() == server.NO_ROUTE
+    assert relay.delivery_result[0] is False and relay.delivery_result[2] == server.NO_ROUTE
+    assert relay.history.counters["01234567890"][0] >= 1
+    assert sum(r.message == server.NO_ROUTE for r in caplog.records) == 1
+    assert len(calls) == 1  # looked up once per interval, not per upload
+    st = relay.status()
+    assert st["route"] == "none" and st["route_detail"] == server.NO_ROUTE
+    # a broker installed later is found at the next look
+    b = FakeBroker()
+    try:
+        found.append({"host": "127.0.0.1", "port": b.port})
+        relay.next_lookup = 0.0
+        relay.handle_upload("/log2.asp", UPLOAD)
+        assert relay.route() == "mqtt" and relay.delivery_result[0] is True
+    finally:
+        b.close()
+
+
+def test_the_webhook_when_set_is_the_only_route(broker, tmp_path):
+    relay = mqtt_relay(broker, tmp_path, webhook_id=WEBHOOK, core_url="http://127.0.0.1:9")
+    relay.handle_upload("/log2.asp", UPLOAD)
+    assert relay.route() == "webhook" and relay.mqtt is None and broker.packets == []
+
+
+class FakeSupervisor(BaseHTTPRequestHandler):
+    answer: ClassVar[tuple[int, dict]] = (200, {})
+    auth: ClassVar[list[str]] = []
+
+    def log_message(self, *a):
+        pass
+
+    def do_GET(self):
+        FakeSupervisor.auth.append(self.headers.get("Authorization", ""))
+        status, doc = FakeSupervisor.answer
+        body = json.dumps(doc).encode()
+        self.send_response(status if self.path == "/services/mqtt" else 404)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def test_the_broker_comes_from_the_supervisor_service():
+    srv = spin(FakeSupervisor)
+    url = f"http://127.0.0.1:{srv.server_port}"
+    try:
+        FakeSupervisor.answer = (
+            200,
+            {
+                "result": "ok",
+                "data": {
+                    "host": "core-mosquitto",
+                    "port": 1883,
+                    "ssl": False,
+                    "protocol": "3.1.1",
+                    "username": "addons",
+                    "password": "pw",
+                },
+            },
+        )
+        found = server.supervisor_mqtt_service("tok", url)
+        assert found == {
+            "host": "core-mosquitto",
+            "port": 1883,
+            "username": "addons",
+            "password": "pw",
+            "tls": False,
+        }
+        assert FakeSupervisor.auth[-1] == "Bearer tok"
+        FakeSupervisor.answer = (400, {"result": "error", "message": "Service not enabled"})
+        assert server.supervisor_mqtt_service("tok", url) is None
+        assert server.supervisor_mqtt_service("", url) is None
+    finally:
+        srv.shutdown()
+
+
+def test_versions_agree():
+    root = pathlib.Path(ROOT)
+    config = (root / "config.yaml").read_text(encoding="utf-8")
+    project = tomllib.loads((root.parent / "pyproject.toml").read_text(encoding="utf-8"))
+    changelog = (root / "CHANGELOG.md").read_text(encoding="utf-8")
+    assert re.search(r'^version: "(.+)"$', config, re.M).group(1) == server.VERSION
+    assert project["project"]["version"] == server.VERSION
+    assert re.search(r"^## (\S+)", changelog, re.M).group(1) == server.VERSION

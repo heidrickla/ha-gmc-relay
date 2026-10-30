@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0
+
+- Readings reach Home Assistant with no YAML: through the Mosquitto broker app, the relay publishes each counter as an MQTT discovery device with four sensors (CPM, ACPM, dose rate, last reading). It finds the broker through the Supervisor, and one installed later within 5 minutes.
+- The sensors ask for the entity ids of the template sensors earlier releases documented (`sensor.geiger_meter_cpm`, `sensor.geiger_meter_usv`) and of their companions (`sensor.geiger_meter_acpm`, `sensor.geiger_meter`), with the same units, so an install that moves off the template keeps its history.
+- `counter_ids` may be left empty: the first counter to upload is accepted and kept in the app's data. Set `counter_ids` to choose others.
+- `webhook_id` is optional. Set, the readings go to that webhook as before and not to MQTT. `core_url`, `core_verify_tls`, `forward_url` and `log_level` are optional with the same defaults.
+- The panel and the log say when the readings cannot reach Home Assistant and why, and while no counter has uploaded yet.
+- The image builds from the multi-architecture base image and carries its own health check on `/healthz`. `build.yaml`, `advanced`, `watchdog` and the keys that only restated defaults are gone.
+
 ## 0.4.1
 
 - A connection that stops sending is closed after 10 seconds on both listeners. The counter opens a second connection after each upload and never writes to it; each one used to hold a file descriptor and a thread, and after about 18 hours the relay ran out of descriptors (`Errno 24`) until the watchdog restarted it.

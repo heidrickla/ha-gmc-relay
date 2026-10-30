@@ -1,24 +1,24 @@
 configuration:
-  webhook_id:
-    name: Webhook id
-    description: The Home Assistant webhook that receives readings. Use the same id in the template trigger.
   counter_ids:
     name: Counter ids
-    description: Accepted GID values. Required; while empty every upload is refused.
+    description: The GID values to accept. Leave empty and the first counter to upload is accepted.
   forward:
     name: Forward to gmcmap
-    description: Replay each upload to the forward URL so the public map keeps updating.
+    description: Replay each upload to gmcmap.com so the public map keeps updating.
   forward_url:
     name: Forward URL
-    description: Where uploads are replayed.
+    description: Where uploads are replayed. Default https://www.gmcmap.com.
+  webhook_id:
+    name: Webhook id
+    description: Only for a template sensor fed by a webhook. Set, the readings go to this webhook instead of MQTT discovery.
   core_url:
     name: Home Assistant URL
-    description: Where the webhook is posted, as the app reaches core. The default works on Home Assistant OS and Supervised.
+    description: Where the webhook is posted, as the app reaches Home Assistant. Default https://homeassistant:8123.
   core_verify_tls:
-    name: Verify core's certificate
-    description: Check core's certificate on an https URL, against core-ca.pem in the app's config folder when it is there, else the system store.
+    name: Verify Home Assistant's certificate
+    description: Check the certificate on an https URL, against core-ca.pem in the app's config folder when it is there, else the system store. Default on.
   log_level:
     name: Log level
-    description: debug logs every request.
+    description: Default info; debug logs every request.
 network:
   80/tcp: Where the counter uploads. GQ counters only speak to port 80.

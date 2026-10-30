@@ -1,6 +1,6 @@
 [project]
 name = "ha-gmc-relay"
-version = "0.4.1"
+version = "0.5.0"
 description = "Home Assistant add-on: relay a GQ GMC Geiger counter upload into Home Assistant"
 requires-python = ">=3.14"
 license = "MIT"
