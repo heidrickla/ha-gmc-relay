@@ -1,4 +1,4 @@
-"""Draw the add-on's icon.png (128x128) and logo.png (256x100): a trefoil.
+"""Build the app's icon.png and logo.png from brand/icon-source.png.
 
 python brand/make_brand.py
 """
@@ -11,25 +11,13 @@ from PIL import Image, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ADDON = os.path.join(HERE, "..", "gmc_relay")
-NAVY = (16, 16, 20, 255)
 AMBER = (242, 163, 60, 255)
 BONE = (232, 227, 216, 255)
 
 
 def trefoil(size: int) -> Image.Image:
-    s = size * 4
-    img = Image.new("RGBA", (s, s), (0, 0, 0, 0))
-    d = ImageDraw.Draw(img)
-    d.rounded_rectangle((0, 0, s - 1, s - 1), radius=s // 5, fill=NAVY)
-    c = s / 2
-    r_out, r_in = s * 0.40, s * 0.15
-    for k in range(3):
-        start = 90 + k * 120 - 30
-        d.pieslice((c - r_out, c - r_out, c + r_out, c + r_out), start, start + 60, fill=AMBER)
-    d.ellipse((c - r_in, c - r_in, c + r_in, c + r_in), fill=NAVY)
-    r_dot = s * 0.07
-    d.ellipse((c - r_dot, c - r_dot, c + r_dot, c + r_dot), fill=AMBER)
-    return img.resize((size, size), Image.LANCZOS)
+    with Image.open(os.path.join(HERE, "icon-source.png")) as source:
+        return source.convert("RGBA").resize((size, size), Image.LANCZOS)
 
 
 def logo() -> Image.Image:
