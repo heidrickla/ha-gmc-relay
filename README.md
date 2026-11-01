@@ -7,13 +7,13 @@ A Home Assistant app that receives a GQ GMC Geiger counter's WiFi upload on port
 
 ## Screenshots
 
-![The GMC Relay panel with the dose rate now, the last 60 readings, a year of daily averages and the week's figures](docs/images/panel.png)
+![The redesigned GMC Relay overview with a live reading, calendar and summary cards](docs/images/dashboard-overview-preview.png)
 
-The panel's top half, with a week of example readings.
+The redesigned overview, rendered from the committed panel with invented preview readings.
 
-![The week's CPM chart, the hour-of-day chart and the count distribution beside a Poisson curve](docs/images/charts.png)
+![The redesigned GMC Relay trend and distribution charts](docs/images/dashboard-trends-preview.png)
 
-The chosen range as a chart, each hour against the range's average, and the count distribution.
+The trend, hour-of-day comparison and count distribution, also using invented data. [Earlier panel overview](docs/images/panel.png) and [earlier charts](docs/images/charts.png) are retained for history.
 
 ## Setup
 
