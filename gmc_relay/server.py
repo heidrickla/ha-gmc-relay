@@ -377,7 +377,9 @@ class MqttPublisher:
         sock = socket.create_connection((self.host, self.port), timeout=10)
         try:
             if self.tls:
-                sock = ssl.create_default_context().wrap_socket(sock, server_hostname=self.host)
+                ctx = ssl.create_default_context()
+                ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+                sock = ctx.wrap_socket(sock, server_hostname=self.host)
             sock.sendall(mqtt_connect(self.client_id, self.keepalive, self.username, self.password))
             ack = b""
             while len(ack) < 4:
